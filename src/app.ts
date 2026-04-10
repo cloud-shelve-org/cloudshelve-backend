@@ -1,0 +1,24 @@
+import express from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
+import morgan from 'morgan';
+
+import authRoutes from './routes/auth.routes';
+import { errorMiddleware } from './middleware/error.middleware';
+
+const app = express();
+
+app.use(helmet());
+app.use(cors());
+app.use(morgan('dev'));
+app.use(express.json());
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.use('/auth', authRoutes);
+
+app.use(errorMiddleware);
+
+export default app;
