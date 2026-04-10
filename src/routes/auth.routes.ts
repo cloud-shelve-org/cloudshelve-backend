@@ -5,8 +5,10 @@ import {
   verifyPhoneOtp,
   verifyEmailOtp,
   googleAuth,
+  deleteAccount,
 } from '../controllers/auth.controller';
 import { confirmPage } from '../controllers/confirm.controller';
+import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
 
@@ -16,5 +18,6 @@ router.post('/otp/email/send', sendEmailOtp);
 router.post('/otp/phone/verify', verifyPhoneOtp);
 router.post('/otp/email/verify', verifyEmailOtp);
 router.post('/google', googleAuth);
+router.delete('/account', authMiddleware, deleteAccount);
 
 export default router;

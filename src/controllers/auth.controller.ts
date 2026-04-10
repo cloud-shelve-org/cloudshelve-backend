@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import type { User } from '@supabase/supabase-js';
-import { supabase } from '../config/supabase';
+import { supabase, supabaseAdmin } from '../config/supabase';
 import { env } from '../config/env';
 import {
   sendPhoneOtpSchema,
@@ -151,6 +151,23 @@ export async function verifyEmailOtp(req: Request, res: Response, next: NextFunc
       user: formatUser(data.user),
       isNewUser: isNewlyCreated(data.user.created_at),
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// DELETE /auth/account  (protected)
+export async function deleteAccount(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { error } = await supabaseAdmin.auth.admin.deleteUser(req.user!.id);
+
+    if (error) {
+      const err: AppError = new Error(error.message);
+      err.statusCode = error.status || 500;
+      return next(err);
+    }
+
+    res.json({ message: 'Account deleted' });
   } catch (err) {
     next(err);
   }
