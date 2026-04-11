@@ -10,28 +10,47 @@ import {
 } from '../services/provider-adapters';
 import { AppError } from '../middleware/error.middleware';
 
-const DEEP_LINK_SCHEME = 'cloudshelve://oauth/callback';
+const ANDROID_PACKAGE = 'com.cloudshelve.app';
 
 /**
- * Serve an HTML page that immediately triggers a deep link via window.location.
+ * Serve an HTML page that returns the user to the app after OAuth consent.
  *
- * A plain HTTP 302 → custom-scheme URL does NOT work in Android Chrome Custom
- * Tabs — Chrome cannot navigate to non-http(s) schemes directly and stalls.
- * Serving an HTML page that sets window.location to the deep link is the
- * standard pattern that works across both Android and iOS.
+ * Platform behaviour:
+ *  - Android Chrome Custom Tabs blocks window.location to custom schemes AND
+ *    ignores plain 302 → custom-scheme redirects. The only reliable mechanism
+ *    is the Android Intent URL format (intent://…#Intent;scheme=…;package=…;end),
+ *    which Chrome Custom Tabs was specifically designed to handle.
+ *  - iOS ASWebAuthenticationSession intercepts custom-scheme redirects at the
+ *    OS level before the browser sees them, so a plain cloudshelve:// URL works.
+ *
+ * We detect the platform from User-Agent and serve the appropriate URL.
  */
-function deepLinkRedirect(res: Response, params: URLSearchParams) {
-  const deepLink = `${DEEP_LINK_SCHEME}?${params}`;
+function deepLinkRedirect(req: Request, res: Response, params: URLSearchParams) {
+  const ua = req.headers['user-agent'] || '';
+  const isAndroid = /Android/i.test(ua);
+
+  // Android intent URL: intent://<path>?<query>#Intent;scheme=<scheme>;package=<pkg>;end
+  // The scheme is excluded from the host/path portion; it goes in the fragment.
+  const intentUrl =
+    `intent://oauth/callback?${params}` +
+    `#Intent;scheme=cloudshelve;package=${ANDROID_PACKAGE};end`;
+
+  // iOS / fallback plain deep link
+  const deepLink = `cloudshelve://oauth/callback?${params}`;
+
+  const redirectUrl = isAndroid ? intentUrl : deepLink;
+
   res.type('html').send(`<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8">
+<head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Redirecting…</title>
-<script>window.location.replace(${JSON.stringify(deepLink)});</script>
+<script>window.location.replace(${JSON.stringify(redirectUrl)});</script>
 </head>
 <body>
 <p>Redirecting back to CloudShelve…</p>
-<p><a href="${deepLink}">Tap here if you are not redirected</a></p>
+<p><a href="${redirectUrl}">Tap here if you are not redirected</a></p>
 </body>
 </html>`);
 }
@@ -96,21 +115,21 @@ export function oauthCallback(req: Request, res: Response) {
 
   if (error) {
     // Provider returned an error (e.g. user denied access)
-    return deepLinkRedirect(res, new URLSearchParams({
+    return deepLinkRedirect(req, res, new URLSearchParams({
       error,
       error_description: error_description || error,
     }));
   }
 
   if (!code || !state) {
-    return deepLinkRedirect(res, new URLSearchParams({
+    return deepLinkRedirect(req, res, new URLSearchParams({
       error: 'missing_params',
       error_description: 'Missing code or state',
     }));
   }
 
   // Forward code and state to the app via deep link
-  deepLinkRedirect(res, new URLSearchParams({ code, state }));
+  deepLinkRedirect(req, res, new URLSearchParams({ code, state }));
 }
 
 /** GET /api/providers/:id — Get provider detail. */
