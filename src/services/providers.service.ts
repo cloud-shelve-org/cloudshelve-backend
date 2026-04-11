@@ -284,6 +284,23 @@ export async function connectProvider(
     storageUsed = storage.used;
     storageTotal = storage.total;
     plainCredentials = tokens;
+
+    // Reject if this exact account (same provider type + email) is already connected.
+    const { data: existing } = await supabaseAdmin
+      .from('providers')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('type', body.provider_type)
+      .eq('email', email)
+      .maybeSingle();
+
+    if (existing) {
+      const err: any = new Error(
+        `This ${email} account is already connected. Please use a different account or remove the existing one first.`,
+      );
+      err.statusCode = 409;
+      throw err;
+    }
   }
 
   // Encrypt credentials before persisting to the DB.
