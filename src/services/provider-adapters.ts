@@ -15,6 +15,7 @@ export interface OAuthTokens {
   access_token: string;
   refresh_token?: string;
   expires_in?: number;
+  expires_at?: number;  // Unix ms timestamp — computed and stored by the service layer
   token_type?: string;
 }
 
@@ -150,6 +151,26 @@ export async function exchangeCode(
       return exchangeBoxCode(code, redirectUri);
     default:
       throw new Error(`Token exchange not supported for ${providerType}`);
+  }
+}
+
+// ─── Token Refresh Dispatcher ───────────────────────────────────────────────────
+
+export async function refreshAccessToken(
+  providerType: ProviderType,
+  refreshToken: string,
+): Promise<OAuthTokens> {
+  switch (providerType) {
+    case 'google_drive':
+      return refreshGoogleToken(refreshToken);
+    case 'onedrive':
+      return refreshOneDriveToken(refreshToken);
+    case 'dropbox':
+      return refreshDropboxToken(refreshToken);
+    case 'box':
+      return refreshBoxToken(refreshToken);
+    default:
+      throw new Error(`Token refresh not supported for ${providerType}`);
   }
 }
 
@@ -365,6 +386,24 @@ async function revokeGoogleToken(token: string): Promise<void> {
   });
 }
 
+async function refreshGoogleToken(refreshToken: string): Promise<OAuthTokens> {
+  const resp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      refresh_token: refreshToken,
+      client_id: env.GOOGLE_CLIENT_ID,
+      client_secret: env.GOOGLE_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Google token refresh failed: ${body}`);
+  }
+  return resp.json() as Promise<OAuthTokens>;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════════
 // ONEDRIVE
 // ═════════════════════════════════════════════════════════════════════════════════
@@ -431,6 +470,28 @@ async function getOneDriveStorage(
     used: data.quota?.used || 0,
     total: data.quota?.total || 0,
   };
+}
+
+async function refreshOneDriveToken(refreshToken: string): Promise<OAuthTokens> {
+  const resp = await fetch(
+    'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        refresh_token: refreshToken,
+        client_id: env.MICROSOFT_CLIENT_ID,
+        client_secret: env.MICROSOFT_CLIENT_SECRET,
+        grant_type: 'refresh_token',
+        scope: 'Files.ReadWrite User.Read offline_access',
+      }),
+    },
+  );
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`OneDrive token refresh failed: ${body}`);
+  }
+  return resp.json() as Promise<OAuthTokens>;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════
@@ -513,6 +574,24 @@ async function revokeDropboxToken(token: string): Promise<void> {
   });
 }
 
+async function refreshDropboxToken(refreshToken: string): Promise<OAuthTokens> {
+  const resp = await fetch('https://api.dropboxapi.com/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      refresh_token: refreshToken,
+      client_id: env.DROPBOX_CLIENT_ID,
+      client_secret: env.DROPBOX_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Dropbox token refresh failed: ${body}`);
+  }
+  return resp.json() as Promise<OAuthTokens>;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════════
 // BOX
 // ═════════════════════════════════════════════════════════════════════════════════
@@ -587,4 +666,22 @@ async function revokeBoxToken(accessToken: string): Promise<void> {
       client_secret: env.BOX_CLIENT_SECRET,
     }),
   });
+}
+
+async function refreshBoxToken(refreshToken: string): Promise<OAuthTokens> {
+  const resp = await fetch('https://api.box.com/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      refresh_token: refreshToken,
+      client_id: env.BOX_CLIENT_ID,
+      client_secret: env.BOX_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Box token refresh failed: ${body}`);
+  }
+  return resp.json() as Promise<OAuthTokens>;
 }

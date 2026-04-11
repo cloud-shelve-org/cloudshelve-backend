@@ -1,0 +1,26 @@
+-- ============================================================
+-- Encrypted credentials format (app-layer AES-256-GCM)
+--
+-- The `credentials` JSONB column now stores an encrypted blob:
+--   { "encrypted": "<iv_hex>:<auth_tag_hex>:<ciphertext_hex>" }
+--
+-- Plaintext structure before encryption:
+--   OAuth providers  → { access_token, refresh_token, expires_in, expires_at, token_type }
+--   MEGA             → { email, password }
+--   AWS S3           → { access_key_id, secret_access_key, region, bucket? }
+--
+-- `expires_at` is a Unix millisecond timestamp (Date.now() + expires_in * 1000)
+-- computed at the service layer on every token write so that the backend can
+-- detect expiry and silently refresh without a separate DB column.
+--
+-- The encryption key is 32 bytes (64 hex chars) read from the
+-- CREDENTIALS_ENCRYPTION_KEY environment variable.
+--
+-- Legacy rows written before this migration contain unencrypted plain JSON.
+-- The decryptCredentials() utility in src/lib/credentials-crypto.ts handles
+-- both forms gracefully: if `credentials.encrypted` is absent the object is
+-- returned as-is (backwards-compatible read path).
+-- ============================================================
+
+-- No schema change required — credentials column is already JSONB.
+-- This migration exists purely as a historical record of the format change.

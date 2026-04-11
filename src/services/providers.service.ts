@@ -1,16 +1,19 @@
 import { supabaseAdmin } from '../config/supabase';
+import { encryptCredentials, decryptCredentials } from '../lib/credentials-crypto';
 import {
   getAuthorizationUrl,
   exchangeCode,
   getUserInfo,
   getStorageQuota,
   revokeTokens,
+  refreshAccessToken,
   createOAuthState,
   validateOAuthState,
   isCredentialProvider,
   retrieveTempCredentials,
   validateMegaCredentials,
   validateS3Credentials,
+  type OAuthTokens,
   type ProviderType,
 } from './provider-adapters';
 
@@ -65,6 +68,75 @@ function mapRowToResponse(row: ProviderRow) {
     storage_total: row.storage_total || 0,
     last_synced_at: row.last_synced_at,
     connected_at: row.created_at,
+  };
+}
+
+// ─── Token helpers ───────────────────────────────────────────────────────────────
+
+/** How many ms before expiry we proactively refresh. */
+const REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Compute `expires_at` (Unix ms) from the raw `expires_in` (seconds) returned
+ * by OAuth endpoints, and merge it into the token object.
+ */
+function withExpiresAt(tokens: OAuthTokens): OAuthTokens {
+  return {
+    ...tokens,
+    expires_at: tokens.expires_in
+      ? Date.now() + tokens.expires_in * 1000
+      : undefined,
+  };
+}
+
+/**
+ * Return a valid access token for the given provider row, refreshing silently
+ * when the stored token is expired or about to expire.
+ *
+ * If tokens were refreshed, `updatedCredentials` is returned so the caller can
+ * persist the new values to the DB.
+ */
+async function getValidAccessToken(row: ProviderRow): Promise<{
+  accessToken: string;
+  updatedCredentials?: Record<string, any>;
+}> {
+  const credentials = decryptCredentials(row.credentials);
+  const { access_token, refresh_token, expires_at } = credentials as OAuthTokens;
+
+  if (!access_token) {
+    const err: any = new Error('No access token available. Please reconnect the provider.');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  // Token is still valid (or has no expiry info stored) — use it as-is.
+  if (!expires_at || Date.now() < expires_at - REFRESH_BUFFER_MS) {
+    return { accessToken: access_token };
+  }
+
+  // Token is expired or expiring soon — attempt a silent refresh.
+  if (!refresh_token) {
+    const err: any = new Error('Access token expired. Please reconnect the provider.');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const providerType = mapDbType(row.type);
+  const newTokens = withExpiresAt(await refreshAccessToken(providerType, refresh_token));
+
+  // Merge new tokens, preserving the refresh_token if the provider didn't issue
+  // a new one (Google keeps the same refresh_token; Box rotates it).
+  const updatedPlain: OAuthTokens = {
+    ...credentials,
+    access_token: newTokens.access_token,
+    expires_in: newTokens.expires_in,
+    expires_at: newTokens.expires_at,
+    refresh_token: newTokens.refresh_token ?? refresh_token,
+  };
+
+  return {
+    accessToken: newTokens.access_token,
+    updatedCredentials: updatedPlain,
   };
 }
 
@@ -148,7 +220,7 @@ export async function connectProvider(
   let displayName: string;
   let storageUsed: number;
   let storageTotal: number;
-  let credentials: Record<string, any>;
+  let plainCredentials: Record<string, any>;
 
   if (isCredentialProvider(body.provider_type)) {
     // ── Credential-based provider (MEGA / S3) ──
@@ -168,7 +240,7 @@ export async function connectProvider(
       displayName = info.displayName;
       storageUsed = info.storageUsed;
       storageTotal = info.storageTotal;
-      credentials = {
+      plainCredentials = {
         email: tempCred.credentials.email,
         password: tempCred.credentials.password,
       };
@@ -183,7 +255,7 @@ export async function connectProvider(
       displayName = info.displayName;
       storageUsed = info.storageUsed;
       storageTotal = info.storageTotal;
-      credentials = {
+      plainCredentials = {
         access_key_id: tempCred.credentials.access_key_id,
         secret_access_key: tempCred.credentials.secret_access_key,
         region: tempCred.credentials.region,
@@ -196,28 +268,29 @@ export async function connectProvider(
     }
   } else {
     // ── OAuth provider (Google / OneDrive / Dropbox / Box) ──
-    const tokens = await exchangeCode(
+    const rawTokens = await exchangeCode(
       body.provider_type,
       body.authorization_code,
       body.redirect_uri,
     );
-    const userInfo = await getUserInfo(
-      body.provider_type,
-      tokens.access_token,
-    );
-    const storage = await getStorageQuota(
-      body.provider_type,
-      tokens.access_token,
-    );
+    // Compute and store expires_at so we can detect expiry on future calls.
+    const tokens = withExpiresAt(rawTokens);
+
+    const userInfo = await getUserInfo(body.provider_type, tokens.access_token);
+    const storage = await getStorageQuota(body.provider_type, tokens.access_token);
 
     email = userInfo.email;
     displayName = userInfo.displayName;
     storageUsed = storage.used;
     storageTotal = storage.total;
-    credentials = tokens;
+    plainCredentials = tokens;
   }
 
-  // Insert provider record
+  // Encrypt credentials before persisting to the DB.
+  const encryptedCredentials = encryptCredentials(plainCredentials);
+
+  // Insert provider record — no unique constraint on (user_id, type), so multiple
+  // accounts from the same provider (e.g. two Google Drive accounts) are supported.
   const { data, error } = await supabaseAdmin
     .from('providers')
     .insert({
@@ -226,7 +299,7 @@ export async function connectProvider(
       label: displayName,
       display_name: displayName,
       email,
-      credentials,
+      credentials: encryptedCredentials,
       storage_used: storageUsed,
       storage_total: storageTotal,
       is_active: true,
@@ -240,7 +313,6 @@ export async function connectProvider(
 
 /** Disconnect a provider: revoke tokens and delete the record. */
 export async function disconnectProvider(userId: string, providerId: string) {
-  // Fetch the provider first to get credentials for revocation
   const { data: provider, error: fetchError } = await supabaseAdmin
     .from('providers')
     .select('*')
@@ -254,13 +326,12 @@ export async function disconnectProvider(userId: string, providerId: string) {
     throw err;
   }
 
-  // Best-effort token revocation
-  await revokeTokens(
-    mapDbType((provider as ProviderRow).type),
-    (provider as ProviderRow).credentials || {},
-  );
+  const row = provider as ProviderRow;
+  // Decrypt before passing to the revocation helper.
+  const plainCredentials = decryptCredentials(row.credentials);
 
-  // Delete the record
+  await revokeTokens(mapDbType(row.type), plainCredentials);
+
   const { error } = await supabaseAdmin
     .from('providers')
     .delete()
@@ -291,33 +362,35 @@ export async function syncProvider(userId: string, providerId: string) {
   let storageTotal = row.storage_total || 0;
 
   if (isCredentialProvider(providerType)) {
-    // Re-validate credentials and refresh storage info
+    const credentials = decryptCredentials(row.credentials);
     if (providerType === 'mega') {
       const info = await validateMegaCredentials(
-        row.credentials.email,
-        row.credentials.password,
+        credentials.email,
+        credentials.password,
       );
       storageUsed = info.storageUsed;
       storageTotal = info.storageTotal;
     } else if (providerType === 'aws_s3') {
       const info = await validateS3Credentials(
-        row.credentials.access_key_id,
-        row.credentials.secret_access_key,
-        row.credentials.region,
-        row.credentials.bucket,
+        credentials.access_key_id,
+        credentials.secret_access_key,
+        credentials.region,
+        credentials.bucket,
       );
       storageUsed = info.storageUsed;
       storageTotal = info.storageTotal;
     }
   } else {
-    // OAuth: refresh storage quota using stored access token
-    const accessToken = row.credentials?.access_token;
-    if (!accessToken) {
-      const err: any = new Error(
-        'No access token available. Please reconnect the provider.',
-      );
-      err.statusCode = 401;
-      throw err;
+    // OAuth: get a valid (auto-refreshed if needed) access token.
+    const { accessToken, updatedCredentials } = await getValidAccessToken(row);
+
+    // If a silent refresh occurred, persist the new encrypted credentials first.
+    if (updatedCredentials) {
+      await supabaseAdmin
+        .from('providers')
+        .update({ credentials: encryptCredentials(updatedCredentials) })
+        .eq('id', providerId)
+        .eq('user_id', userId);
     }
 
     const storage = await getStorageQuota(providerType, accessToken);
@@ -325,7 +398,6 @@ export async function syncProvider(userId: string, providerId: string) {
     storageTotal = storage.total;
   }
 
-  // Update the record
   const { data, error } = await supabaseAdmin
     .from('providers')
     .update({
