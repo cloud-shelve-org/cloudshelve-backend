@@ -1,9 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import { env } from '../config/env';
+import { supabaseAdmin } from '../config/supabase';
 import { AppError } from './error.middleware';
 
-export function authMiddleware(req: Request, _res: Response, next: NextFunction): void {
+export async function authMiddleware(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith('Bearer ')) {
@@ -14,17 +13,19 @@ export function authMiddleware(req: Request, _res: Response, next: NextFunction)
 
   const token = authHeader.slice(7);
 
-  try {
-    const decoded = jwt.verify(token, env.JWT_SECRET) as jwt.JwtPayload;
-    req.user = {
-      id: decoded.sub as string,
-      email: decoded.email,
-      phone: decoded.phone,
-    };
-    next();
-  } catch {
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+
+  if (error || !data.user) {
     const err: AppError = new Error('Invalid or expired token');
     err.statusCode = 401;
-    next(err);
+    return next(err);
   }
+
+  req.user = {
+    id: data.user.id,
+    email: data.user.email,
+    phone: data.user.phone,
+  };
+
+  next();
 }
