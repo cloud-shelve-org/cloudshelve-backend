@@ -1,5 +1,4 @@
 import type { ProviderType } from './provider-adapters';
-import { env } from '../config/env';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,10 +19,10 @@ export interface FileItem {
 
 export interface ListFilesResult {
   items: FileItem[];
-  nextPageToken: string | null;  // pass back on next call for pagination
+  nextPageToken: string | null;
 }
 
-// ─── Dispatcher ──────────────────────────────────────────────────────────────
+// ─── Dispatchers ─────────────────────────────────────────────────────────────
 
 export async function listFiles(
   providerType: ProviderType,
@@ -33,16 +32,11 @@ export async function listFiles(
   pageSize: number,
 ): Promise<ListFilesResult> {
   switch (providerType) {
-    case 'google_drive':
-      return listGoogleDriveFiles(accessToken, folderId, pageToken, pageSize);
-    case 'onedrive':
-      return listOneDriveFiles(accessToken, folderId, pageToken, pageSize);
-    case 'dropbox':
-      return listDropboxFiles(accessToken, folderId, pageToken, pageSize);
-    case 'box':
-      return listBoxFiles(accessToken, folderId, pageToken, pageSize);
-    default:
-      throw new Error(`File listing not supported for ${providerType}`);
+    case 'google_drive': return listGoogleDriveFiles(accessToken, folderId, pageToken, pageSize);
+    case 'onedrive':     return listOneDriveFiles(accessToken, folderId, pageToken, pageSize);
+    case 'dropbox':      return listDropboxFiles(accessToken, folderId, pageToken, pageSize);
+    case 'box':          return listBoxFiles(accessToken, folderId, pageToken, pageSize);
+    default: throw new Error(`File listing not supported for ${providerType}`);
   }
 }
 
@@ -54,16 +48,74 @@ export async function searchFiles(
   pageSize: number,
 ): Promise<ListFilesResult> {
   switch (providerType) {
-    case 'google_drive':
-      return searchGoogleDriveFiles(accessToken, query, pageToken, pageSize);
-    case 'onedrive':
-      return searchOneDriveFiles(accessToken, query, pageToken, pageSize);
-    case 'dropbox':
-      return searchDropboxFiles(accessToken, query, pageToken, pageSize);
-    case 'box':
-      return searchBoxFiles(accessToken, query, pageToken, pageSize);
-    default:
-      throw new Error(`File search not supported for ${providerType}`);
+    case 'google_drive': return searchGoogleDriveFiles(accessToken, query, pageToken, pageSize);
+    case 'onedrive':     return searchOneDriveFiles(accessToken, query, pageToken, pageSize);
+    case 'dropbox':      return searchDropboxFiles(accessToken, query, pageToken, pageSize);
+    case 'box':          return searchBoxFiles(accessToken, query, pageToken, pageSize);
+    default: throw new Error(`File search not supported for ${providerType}`);
+  }
+}
+
+export async function createFolder(
+  providerType: ProviderType,
+  accessToken: string,
+  parentId: string | null,
+  name: string,
+): Promise<FileItem> {
+  switch (providerType) {
+    case 'google_drive': return createGoogleDriveFolder(accessToken, parentId, name);
+    case 'onedrive':     return createOneDriveFolder(accessToken, parentId, name);
+    case 'dropbox':      return createDropboxFolder(accessToken, parentId, name);
+    case 'box':          return createBoxFolder(accessToken, parentId, name);
+    default: throw new Error(`Folder creation not supported for ${providerType}`);
+  }
+}
+
+export async function deleteFile(
+  providerType: ProviderType,
+  accessToken: string,
+  fileId: string,
+  filePath?: string | null,
+): Promise<void> {
+  switch (providerType) {
+    case 'google_drive': return deleteGoogleDriveFile(accessToken, fileId);
+    case 'onedrive':     return deleteOneDriveFile(accessToken, fileId);
+    case 'dropbox':      return deleteDropboxFile(accessToken, filePath || fileId);
+    case 'box':          return deleteBoxFile(accessToken, fileId);
+    default: throw new Error(`File deletion not supported for ${providerType}`);
+  }
+}
+
+export async function renameFile(
+  providerType: ProviderType,
+  accessToken: string,
+  fileId: string,
+  newName: string,
+  filePath?: string | null,
+): Promise<FileItem> {
+  switch (providerType) {
+    case 'google_drive': return renameGoogleDriveFile(accessToken, fileId, newName);
+    case 'onedrive':     return renameOneDriveFile(accessToken, fileId, newName);
+    case 'dropbox':      return renameDropboxFile(accessToken, fileId, newName, filePath);
+    case 'box':          return renameBoxFile(accessToken, fileId, newName);
+    default: throw new Error(`Rename not supported for ${providerType}`);
+  }
+}
+
+export async function uploadFile(
+  providerType: ProviderType,
+  accessToken: string,
+  parentId: string | null,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer,
+): Promise<FileItem> {
+  switch (providerType) {
+    case 'google_drive': return uploadGoogleDriveFile(accessToken, parentId, fileName, mimeType, buffer);
+    case 'onedrive':     return uploadOneDriveFile(accessToken, parentId, fileName, mimeType, buffer);
+    case 'dropbox':      return uploadDropboxFile(accessToken, parentId, fileName, buffer);
+    case 'box':          return uploadBoxFile(accessToken, parentId, fileName, mimeType, buffer);
+    default: throw new Error(`File upload not supported for ${providerType}`);
   }
 }
 
@@ -71,11 +123,11 @@ export async function searchFiles(
 // GOOGLE DRIVE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Google Drive MIME type for folders
 const GDRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
-// Fields to request from the Files API
 const GDRIVE_FIELDS =
   'nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink,webContentLink,parents)';
+const GDRIVE_FILE_FIELDS =
+  'id,name,mimeType,size,modifiedTime,thumbnailLink,webContentLink,parents';
 
 async function listGoogleDriveFiles(
   accessToken: string,
@@ -91,18 +143,13 @@ async function listGoogleDriveFiles(
     pageSize: String(pageSize),
     ...(pageToken ? { pageToken } : {}),
   });
-
   const resp = await fetch(
     `https://www.googleapis.com/drive/v3/files?${params}`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
   if (!resp.ok) throw new Error(`Google Drive list failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
-  return {
-    items: (data.files || []).map(mapGoogleDriveItem),
-    nextPageToken: data.nextPageToken || null,
-  };
+  return { items: (data.files || []).map(mapGoogleDriveItem), nextPageToken: data.nextPageToken || null };
 }
 
 async function searchGoogleDriveFiles(
@@ -118,18 +165,85 @@ async function searchGoogleDriveFiles(
     pageSize: String(pageSize),
     ...(pageToken ? { pageToken } : {}),
   });
-
   const resp = await fetch(
     `https://www.googleapis.com/drive/v3/files?${params}`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
   if (!resp.ok) throw new Error(`Google Drive search failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
-  return {
-    items: (data.files || []).map(mapGoogleDriveItem),
-    nextPageToken: data.nextPageToken || null,
-  };
+  return { items: (data.files || []).map(mapGoogleDriveItem), nextPageToken: data.nextPageToken || null };
+}
+
+async function createGoogleDriveFolder(
+  accessToken: string,
+  parentId: string | null,
+  name: string,
+): Promise<FileItem> {
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files?fields=${GDRIVE_FILE_FIELDS}`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, mimeType: GDRIVE_FOLDER_MIME, parents: [parentId || 'root'] }),
+    },
+  );
+  if (!resp.ok) throw new Error(`Google Drive create folder failed: ${await resp.text()}`);
+  return mapGoogleDriveItem(await resp.json());
+}
+
+async function deleteGoogleDriveFile(accessToken: string, fileId: string): Promise<void> {
+  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok && resp.status !== 204) throw new Error(`Google Drive delete failed: ${await resp.text()}`);
+}
+
+async function renameGoogleDriveFile(accessToken: string, fileId: string, newName: string): Promise<FileItem> {
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=${GDRIVE_FILE_FIELDS}`,
+    {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    },
+  );
+  if (!resp.ok) throw new Error(`Google Drive rename failed: ${await resp.text()}`);
+  return mapGoogleDriveItem(await resp.json());
+}
+
+async function uploadGoogleDriveFile(
+  accessToken: string,
+  parentId: string | null,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer,
+): Promise<FileItem> {
+  const metadata = JSON.stringify({ name: fileName, parents: [parentId || 'root'] });
+  const boundary = '===cloudshelve_boundary===';
+
+  const multipart = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`),
+    Buffer.from(metadata),
+    Buffer.from(`\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),
+    buffer,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+
+  const resp = await fetch(
+    `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=${GDRIVE_FILE_FIELDS}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+        'Content-Length': String(multipart.length),
+      },
+      body: multipart,
+    },
+  );
+  if (!resp.ok) throw new Error(`Google Drive upload failed: ${await resp.text()}`);
+  return mapGoogleDriveItem(await resp.json());
 }
 
 function mapGoogleDriveItem(f: any): FileItem {
@@ -152,6 +266,8 @@ function mapGoogleDriveItem(f: any): FileItem {
 // ONEDRIVE
 // ═══════════════════════════════════════════════════════════════════════════════
 
+const OD_SELECT = 'id,name,file,folder,size,lastModifiedDateTime,thumbnails,@microsoft.graph.downloadUrl,parentReference';
+
 async function listOneDriveFiles(
   accessToken: string,
   folderId: string | null,
@@ -161,30 +277,13 @@ async function listOneDriveFiles(
   const base = folderId
     ? `https://graph.microsoft.com/v1.0/me/drive/items/${folderId}/children`
     : `https://graph.microsoft.com/v1.0/me/drive/root/children`;
-
-  const params = new URLSearchParams({
-    $select: 'id,name,file,folder,size,lastModifiedDateTime,thumbnails,@microsoft.graph.downloadUrl,parentReference',
-    $orderby: 'name asc',
-    $top: String(pageSize),
-    ...(pageToken ? { $skiptoken: pageToken } : {}),
-  });
-
-  const resp = await fetch(`${base}?${params}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const params = new URLSearchParams({ $select: OD_SELECT, $orderby: 'name asc', $top: String(pageSize), ...(pageToken ? { $skiptoken: pageToken } : {}) });
+  const resp = await fetch(`${base}?${params}`, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!resp.ok) throw new Error(`OneDrive list failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
-  // Extract skiptoken from @odata.nextLink
   const nextLink: string | null = data['@odata.nextLink'] || null;
-  const nextPageToken = nextLink
-    ? new URL(nextLink).searchParams.get('$skiptoken')
-    : null;
-
-  return {
-    items: (data.value || []).map(mapOneDriveItem),
-    nextPageToken,
-  };
+  const nextPageToken = nextLink ? new URL(nextLink).searchParams.get('$skiptoken') : null;
+  return { items: (data.value || []).map(mapOneDriveItem), nextPageToken };
 }
 
 async function searchOneDriveFiles(
@@ -193,29 +292,70 @@ async function searchOneDriveFiles(
   pageToken: string | null,
   pageSize: number,
 ): Promise<ListFilesResult> {
-  const params = new URLSearchParams({
-    q: query,
-    $select: 'id,name,file,folder,size,lastModifiedDateTime,@microsoft.graph.downloadUrl,parentReference',
-    $top: String(pageSize),
-    ...(pageToken ? { $skiptoken: pageToken } : {}),
-  });
-
+  const params = new URLSearchParams({ q: query, $select: OD_SELECT, $top: String(pageSize), ...(pageToken ? { $skiptoken: pageToken } : {}) });
   const resp = await fetch(
     `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${encodeURIComponent(query)}')?${params}`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
   if (!resp.ok) throw new Error(`OneDrive search failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
   const nextLink: string | null = data['@odata.nextLink'] || null;
-  const nextPageToken = nextLink
-    ? new URL(nextLink).searchParams.get('$skiptoken')
-    : null;
+  const nextPageToken = nextLink ? new URL(nextLink).searchParams.get('$skiptoken') : null;
+  return { items: (data.value || []).map(mapOneDriveItem), nextPageToken };
+}
 
-  return {
-    items: (data.value || []).map(mapOneDriveItem),
-    nextPageToken,
-  };
+async function createOneDriveFolder(
+  accessToken: string,
+  parentId: string | null,
+  name: string,
+): Promise<FileItem> {
+  const url = parentId
+    ? `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}/children`
+    : `https://graph.microsoft.com/v1.0/me/drive/root/children`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, folder: {}, '@microsoft.graph.conflictBehavior': 'rename' }),
+  });
+  if (!resp.ok) throw new Error(`OneDrive create folder failed: ${await resp.text()}`);
+  return mapOneDriveItem(await resp.json());
+}
+
+async function deleteOneDriveFile(accessToken: string, fileId: string): Promise<void> {
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${fileId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok && resp.status !== 204) throw new Error(`OneDrive delete failed: ${await resp.text()}`);
+}
+
+async function renameOneDriveFile(accessToken: string, fileId: string, newName: string): Promise<FileItem> {
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${fileId}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: newName }),
+  });
+  if (!resp.ok) throw new Error(`OneDrive rename failed: ${await resp.text()}`);
+  return mapOneDriveItem(await resp.json());
+}
+
+async function uploadOneDriveFile(
+  accessToken: string,
+  parentId: string | null,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer,
+): Promise<FileItem> {
+  const url = parentId
+    ? `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${encodeURIComponent(fileName)}:/content`
+    : `https://graph.microsoft.com/v1.0/me/drive/root:/${encodeURIComponent(fileName)}:/content`;
+  const resp = await fetch(url, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': mimeType },
+    body: buffer,
+  });
+  if (!resp.ok) throw new Error(`OneDrive upload failed: ${await resp.text()}`);
+  return mapOneDriveItem(await resp.json());
 }
 
 function mapOneDriveItem(f: any): FileItem {
@@ -246,34 +386,21 @@ async function listDropboxFiles(
 ): Promise<ListFilesResult> {
   let url: string;
   let body: any;
-
   if (pageToken) {
     url = 'https://api.dropboxapi.com/2/files/list_folder/continue';
     body = { cursor: pageToken };
   } else {
     url = 'https://api.dropboxapi.com/2/files/list_folder';
-    body = {
-      path: folderId || '',
-      limit: pageSize,
-      include_media_info: true,
-    };
+    body = { path: folderId || '', limit: pageSize, include_media_info: true };
   }
-
   const resp = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!resp.ok) throw new Error(`Dropbox list failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
-  return {
-    items: (data.entries || []).map(mapDropboxItem),
-    nextPageToken: data.has_more ? data.cursor : null,
-  };
+  return { items: (data.entries || []).map(mapDropboxItem), nextPageToken: data.has_more ? data.cursor : null };
 }
 
 async function searchDropboxFiles(
@@ -284,38 +411,100 @@ async function searchDropboxFiles(
 ): Promise<ListFilesResult> {
   let url: string;
   let body: any;
-
   if (pageToken) {
     url = 'https://api.dropboxapi.com/2/files/search/continue_v2';
     body = { cursor: pageToken };
   } else {
     url = 'https://api.dropboxapi.com/2/files/search_v2';
-    body = {
-      query,
-      options: { max_results: pageSize, file_status: 'active' },
-    };
+    body = { query, options: { max_results: pageSize, file_status: 'active' } };
   }
-
   const resp = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!resp.ok) throw new Error(`Dropbox search failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
-  const items = (data.matches || [])
-    .map((m: any) => m.metadata?.metadata)
-    .filter(Boolean)
-    .map(mapDropboxItem);
+  const items = (data.matches || []).map((m: any) => m.metadata?.metadata).filter(Boolean).map(mapDropboxItem);
+  return { items, nextPageToken: data.has_more ? data.cursor : null };
+}
 
-  return {
-    items,
-    nextPageToken: data.has_more ? data.cursor : null,
-  };
+async function createDropboxFolder(
+  accessToken: string,
+  parentId: string | null,
+  name: string,
+): Promise<FileItem> {
+  // parentId is either empty (root) or a Dropbox path/ID
+  const parentPath = parentId && !parentId.startsWith('id:') ? parentId : '';
+  const path = `${parentPath}/${name}`.replace('//', '/');
+  const resp = await fetch('https://api.dropboxapi.com/2/files/create_folder_v2', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, autorename: true }),
+  });
+  if (!resp.ok) throw new Error(`Dropbox create folder failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  return mapDropboxItem(data.metadata);
+}
+
+async function deleteDropboxFile(accessToken: string, filePath: string): Promise<void> {
+  const resp = await fetch('https://api.dropboxapi.com/2/files/delete_v2', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: filePath }),
+  });
+  if (!resp.ok) throw new Error(`Dropbox delete failed: ${await resp.text()}`);
+}
+
+async function renameDropboxFile(
+  accessToken: string,
+  fileId: string,
+  newName: string,
+  filePath?: string | null,
+): Promise<FileItem> {
+  // Resolve current path: use filePath if available, else fetch metadata
+  let currentPath = filePath;
+  if (!currentPath) {
+    const metaResp = await fetch('https://api.dropboxapi.com/2/files/get_metadata', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: fileId.startsWith('id:') ? fileId : `id:${fileId}` }),
+    });
+    if (!metaResp.ok) throw new Error(`Dropbox get metadata failed: ${await metaResp.text()}`);
+    const meta: any = await metaResp.json();
+    currentPath = meta.path_lower;
+  }
+  const parentPath = currentPath!.substring(0, currentPath!.lastIndexOf('/'));
+  const toPath = `${parentPath}/${newName}`;
+  const resp = await fetch('https://api.dropboxapi.com/2/files/move_v2', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_path: currentPath, to_path: toPath, autorename: false }),
+  });
+  if (!resp.ok) throw new Error(`Dropbox rename failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  return mapDropboxItem(data.metadata);
+}
+
+async function uploadDropboxFile(
+  accessToken: string,
+  parentId: string | null,
+  fileName: string,
+  buffer: Buffer,
+): Promise<FileItem> {
+  const parentPath = parentId && !parentId.startsWith('id:') ? parentId : '';
+  const path = `${parentPath}/${fileName}`.replace('//', '/');
+  const resp = await fetch('https://content.dropboxapi.com/2/files/upload', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/octet-stream',
+      'Dropbox-API-Arg': JSON.stringify({ path, mode: 'add', autorename: true }),
+    },
+    body: buffer,
+  });
+  if (!resp.ok) throw new Error(`Dropbox upload failed: ${await resp.text()}`);
+  return mapDropboxItem(await resp.json());
 }
 
 function mapDropboxItem(f: any): FileItem {
@@ -324,11 +513,11 @@ function mapDropboxItem(f: any): FileItem {
     id: f.id || f.path_lower,
     name: f.name,
     kind: isFolder ? 'folder' : 'file',
-    mimeType: null,  // Dropbox doesn't return MIME types
+    mimeType: null,
     size: f.size || null,
     modifiedAt: f.server_modified || f.client_modified || null,
     thumbnailUrl: null,
-    downloadUrl: null,  // requires a separate create_shared_link call
+    downloadUrl: null,
     path: f.path_lower || null,
     parentId: null,
   };
@@ -344,28 +533,15 @@ async function listBoxFiles(
   pageToken: string | null,
   pageSize: number,
 ): Promise<ListFilesResult> {
-  const folder = folderId || '0';  // '0' is Box root
+  const folder = folderId || '0';
   const offset = pageToken ? parseInt(pageToken, 10) : 0;
-  const params = new URLSearchParams({
-    fields: 'id,name,type,size,modified_at,parent',
-    limit: String(pageSize),
-    offset: String(offset),
-  });
-
-  const resp = await fetch(`https://api.box.com/2.0/folders/${folder}/items?${params}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const params = new URLSearchParams({ fields: 'id,name,type,size,modified_at,parent', limit: String(pageSize), offset: String(offset) });
+  const resp = await fetch(`https://api.box.com/2.0/folders/${folder}/items?${params}`, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!resp.ok) throw new Error(`Box list failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
   const total = data.total_count || 0;
   const nextOffset = offset + (data.entries?.length || 0);
-  const hasMore = nextOffset < total;
-
-  return {
-    items: (data.entries || []).map(mapBoxItem),
-    nextPageToken: hasMore ? String(nextOffset) : null,
-  };
+  return { items: (data.entries || []).map(mapBoxItem), nextPageToken: nextOffset < total ? String(nextOffset) : null };
 }
 
 async function searchBoxFiles(
@@ -375,27 +551,91 @@ async function searchBoxFiles(
   pageSize: number,
 ): Promise<ListFilesResult> {
   const offset = pageToken ? parseInt(pageToken, 10) : 0;
-  const params = new URLSearchParams({
-    query,
-    fields: 'id,name,type,size,modified_at,parent',
-    limit: String(pageSize),
-    offset: String(offset),
-  });
-
-  const resp = await fetch(`https://api.box.com/2.0/search?${params}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const params = new URLSearchParams({ query, fields: 'id,name,type,size,modified_at,parent', limit: String(pageSize), offset: String(offset) });
+  const resp = await fetch(`https://api.box.com/2.0/search?${params}`, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!resp.ok) throw new Error(`Box search failed: ${await resp.text()}`);
-
   const data: any = await resp.json();
   const total = data.total_count || 0;
   const nextOffset = offset + (data.entries?.length || 0);
-  const hasMore = nextOffset < total;
+  return { items: (data.entries || []).map(mapBoxItem), nextPageToken: nextOffset < total ? String(nextOffset) : null };
+}
 
-  return {
-    items: (data.entries || []).map(mapBoxItem),
-    nextPageToken: hasMore ? String(nextOffset) : null,
-  };
+async function createBoxFolder(
+  accessToken: string,
+  parentId: string | null,
+  name: string,
+): Promise<FileItem> {
+  const resp = await fetch('https://api.box.com/2.0/folders', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, parent: { id: parentId || '0' } }),
+  });
+  if (!resp.ok) throw new Error(`Box create folder failed: ${await resp.text()}`);
+  return mapBoxItem(await resp.json());
+}
+
+async function deleteBoxFile(accessToken: string, fileId: string): Promise<void> {
+  // Try file first, then folder
+  let resp = await fetch(`https://api.box.com/2.0/files/${fileId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (resp.status === 404) {
+    resp = await fetch(`https://api.box.com/2.0/folders/${fileId}?recursive=true`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  }
+  if (!resp.ok && resp.status !== 204) throw new Error(`Box delete failed: ${await resp.text()}`);
+}
+
+async function renameBoxFile(accessToken: string, fileId: string, newName: string): Promise<FileItem> {
+  // Try file, fallback to folder
+  let resp = await fetch(`https://api.box.com/2.0/files/${fileId}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: newName }),
+  });
+  if (resp.status === 404) {
+    resp = await fetch(`https://api.box.com/2.0/folders/${fileId}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    });
+  }
+  if (!resp.ok) throw new Error(`Box rename failed: ${await resp.text()}`);
+  return mapBoxItem(await resp.json());
+}
+
+async function uploadBoxFile(
+  accessToken: string,
+  parentId: string | null,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer,
+): Promise<FileItem> {
+  const attributes = JSON.stringify({ name: fileName, parent: { id: parentId || '0' } });
+  const boundary = '---cloudshelve_box_boundary';
+
+  const multipart = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="attributes"\r\n\r\n`),
+    Buffer.from(attributes),
+    Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`),
+    buffer,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+
+  const resp = await fetch('https://upload.box.com/api/2.0/files/content', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    },
+    body: multipart,
+  });
+  if (!resp.ok) throw new Error(`Box upload failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  return mapBoxItem(data.entries?.[0] || data);
 }
 
 function mapBoxItem(f: any): FileItem {

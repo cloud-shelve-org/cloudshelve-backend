@@ -1,7 +1,14 @@
 import { supabaseAdmin } from '../config/supabase';
 import { decryptCredentials, encryptCredentials } from '../lib/credentials-crypto';
 import { refreshAccessToken, type OAuthTokens, type ProviderType } from './provider-adapters';
-import { listFiles as adapterListFiles, searchFiles as adapterSearchFiles } from './files-adapters';
+import {
+  listFiles as adapterListFiles,
+  searchFiles as adapterSearchFiles,
+  createFolder as adapterCreateFolder,
+  deleteFile as adapterDeleteFile,
+  renameFile as adapterRenameFile,
+  uploadFile as adapterUploadFile,
+} from './files-adapters';
 
 const DB_TYPE_TO_API: Record<string, ProviderType> = {
   gdrive: 'google_drive',
@@ -44,12 +51,10 @@ async function resolveAccessToken(
     throw err;
   }
 
-  // Token still valid
   if (!expires_at || Date.now() < expires_at - REFRESH_BUFFER_MS) {
     return { accessToken: access_token, providerType };
   }
 
-  // Silent refresh
   if (!refresh_token) {
     const err: any = new Error('Access token expired. Please reconnect the provider.');
     err.statusCode = 401;
@@ -65,7 +70,6 @@ async function resolveAccessToken(
     : undefined;
   newTokens.refresh_token = newTokens.refresh_token ?? refresh_token;
 
-  // Persist refreshed credentials
   await supabaseAdmin
     .from('providers')
     .update({ credentials: encryptCredentials(newTokens) })
@@ -97,4 +101,47 @@ export async function searchProviderFiles(
 ) {
   const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
   return adapterSearchFiles(providerType, accessToken, query, pageToken, pageSize);
+}
+
+export async function createProviderFolder(
+  userId: string,
+  providerId: string,
+  parentId: string | null,
+  name: string,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterCreateFolder(providerType, accessToken, parentId, name);
+}
+
+export async function deleteProviderFile(
+  userId: string,
+  providerId: string,
+  fileId: string,
+  filePath?: string | null,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterDeleteFile(providerType, accessToken, fileId, filePath);
+}
+
+export async function renameProviderFile(
+  userId: string,
+  providerId: string,
+  fileId: string,
+  newName: string,
+  filePath?: string | null,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterRenameFile(providerType, accessToken, fileId, newName, filePath);
+}
+
+export async function uploadProviderFile(
+  userId: string,
+  providerId: string,
+  parentId: string | null,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterUploadFile(providerType, accessToken, parentId, fileName, mimeType, buffer);
 }
