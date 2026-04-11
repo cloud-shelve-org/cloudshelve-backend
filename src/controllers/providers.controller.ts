@@ -10,7 +10,31 @@ import {
 } from '../services/provider-adapters';
 import { AppError } from '../middleware/error.middleware';
 
-const DEEP_LINK_BASE = 'cloudshelve://oauth/callback';
+const DEEP_LINK_SCHEME = 'cloudshelve://oauth/callback';
+
+/**
+ * Serve an HTML page that immediately triggers a deep link via window.location.
+ *
+ * A plain HTTP 302 → custom-scheme URL does NOT work in Android Chrome Custom
+ * Tabs — Chrome cannot navigate to non-http(s) schemes directly and stalls.
+ * Serving an HTML page that sets window.location to the deep link is the
+ * standard pattern that works across both Android and iOS.
+ */
+function deepLinkRedirect(res: Response, params: URLSearchParams) {
+  const deepLink = `${DEEP_LINK_SCHEME}?${params}`;
+  res.type('html').send(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Redirecting…</title>
+<script>window.location.replace(${JSON.stringify(deepLink)});</script>
+</head>
+<body>
+<p>Redirecting back to CloudShelve…</p>
+<p><a href="${deepLink}">Tap here if you are not redirected</a></p>
+</body>
+</html>`);
+}
 
 function badRequest(message: string): AppError {
   const err: AppError = new Error(message);
@@ -72,22 +96,21 @@ export function oauthCallback(req: Request, res: Response) {
 
   if (error) {
     // Provider returned an error (e.g. user denied access)
-    const params = new URLSearchParams({
+    return deepLinkRedirect(res, new URLSearchParams({
       error,
       error_description: error_description || error,
-    });
-    return res.redirect(`${DEEP_LINK_BASE}?${params}`);
+    }));
   }
 
   if (!code || !state) {
-    return res.redirect(
-      `${DEEP_LINK_BASE}?error=missing_params&error_description=Missing+code+or+state`,
-    );
+    return deepLinkRedirect(res, new URLSearchParams({
+      error: 'missing_params',
+      error_description: 'Missing code or state',
+    }));
   }
 
   // Forward code and state to the app via deep link
-  const params = new URLSearchParams({ code, state });
-  res.redirect(`${DEEP_LINK_BASE}?${params}`);
+  deepLinkRedirect(res, new URLSearchParams({ code, state }));
 }
 
 /** GET /api/providers/:id — Get provider detail. */
