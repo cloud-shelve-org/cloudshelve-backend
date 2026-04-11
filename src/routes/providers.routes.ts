@@ -5,6 +5,7 @@ import {
   listProviders,
   getProviderDetail,
   getOAuthUrl,
+  oauthCallback,
   connectProvider,
   disconnectProvider,
   syncProvider,
@@ -14,7 +15,10 @@ import {
 
 const router = Router();
 
-// ── Public routes (credential form served in an in-app browser) ──────────────
+// ── Public routes (no auth required) ────────────────────────────────────────
+// OAuth callback: Google/OneDrive/Dropbox/Box redirects here, we forward to app deep link
+router.get('/oauth/callback', oauthCallback);
+// Credential form for MEGA / AWS S3 (opened in in-app browser)
 router.get('/auth-form', authFormPage);
 router.post(
   '/auth-form',

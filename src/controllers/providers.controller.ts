@@ -10,6 +10,8 @@ import {
 } from '../services/provider-adapters';
 import { AppError } from '../middleware/error.middleware';
 
+const DEEP_LINK_BASE = 'cloudshelve://oauth/callback';
+
 function badRequest(message: string): AppError {
   const err: AppError = new Error(message);
   err.statusCode = 400;
@@ -53,6 +55,39 @@ export async function getOAuthUrl(
   } catch (err) {
     next(err);
   }
+}
+
+/**
+ * GET /api/providers/oauth/callback — Backend OAuth callback.
+ *
+ * All OAuth providers (Google, OneDrive, Dropbox, Box) redirect here after
+ * user consent. This endpoint forwards the authorization code to the mobile
+ * app via the cloudshelve:// deep link so expo-web-browser can close.
+ *
+ * This is a PUBLIC endpoint (no auth middleware) — it is called by the
+ * provider's auth server, not by the mobile app.
+ */
+export function oauthCallback(req: Request, res: Response) {
+  const { code, state, error, error_description } = req.query as Record<string, string>;
+
+  if (error) {
+    // Provider returned an error (e.g. user denied access)
+    const params = new URLSearchParams({
+      error,
+      error_description: error_description || error,
+    });
+    return res.redirect(`${DEEP_LINK_BASE}?${params}`);
+  }
+
+  if (!code || !state) {
+    return res.redirect(
+      `${DEEP_LINK_BASE}?error=missing_params&error_description=Missing+code+or+state`,
+    );
+  }
+
+  // Forward code and state to the app via deep link
+  const params = new URLSearchParams({ code, state });
+  res.redirect(`${DEEP_LINK_BASE}?${params}`);
 }
 
 /** GET /api/providers/:id — Get provider detail. */

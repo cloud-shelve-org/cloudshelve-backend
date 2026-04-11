@@ -106,14 +106,24 @@ export async function generateOAuthUrl(
   formBaseUrl?: string,
 ) {
   const state = createOAuthState(userId, providerType);
-  const redirectUri = 'cloudshelve://oauth/callback';
+
+  // For credential-based providers (MEGA / S3), use the hosted form URL.
+  // For OAuth providers, use the backend's own HTTPS callback endpoint so that
+  // Google / OneDrive / Dropbox / Box accept it as an authorized redirect URI.
+  // The backend callback will then forward the code to the app via deep link.
+  const redirectUri = formBaseUrl
+    ? `${formBaseUrl}/api/providers/oauth/callback`
+    : 'cloudshelve://oauth/callback';
+
   const authorizationUrl = getAuthorizationUrl(
     providerType,
     redirectUri,
     state,
     formBaseUrl,
   );
-  return { authorization_url: authorizationUrl, state };
+  // Return redirect_uri so the frontend can pass it back during the connect step
+  // (token exchange requires the same redirect_uri that was used in the auth URL).
+  return { authorization_url: authorizationUrl, state, redirect_uri: redirectUri };
 }
 
 /** Exchange auth code / temp credentials for a provider connection. */
