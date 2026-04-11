@@ -30,7 +30,7 @@ export async function listFiles(req: Request, res: Response, next: NextFunction)
     const { folder_id, page_token, page_size } = parsed.data;
     const data = await listProviderFiles(
       req.user!.id,
-      req.params.providerId,
+      String(req.params.providerId),
       folder_id ?? null,
       page_token ?? null,
       page_size,
@@ -57,7 +57,7 @@ export async function searchFiles(req: Request, res: Response, next: NextFunctio
     const { q, page_token, page_size } = parsed.data;
     const data = await searchProviderFiles(
       req.user!.id,
-      req.params.providerId,
+      String(req.params.providerId),
       q,
       page_token ?? null,
       page_size,
