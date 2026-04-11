@@ -10,6 +10,10 @@ import { errorMiddleware } from './middleware/error.middleware';
 
 const app = express();
 
+// Trust Railway's (and other reverse proxies') forwarded headers so that
+// req.protocol returns 'https' instead of 'http' behind the load balancer.
+app.set('trust proxy', true);
+
 app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
