@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { env } from '../config/env';
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
@@ -56,7 +56,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 export function createOAuthState(userId: string, providerType: ProviderType): string {
-  const state = uuidv4();
+  const state = randomUUID();
   oauthStateStore.set(state, { userId, providerType, createdAt: Date.now() });
   return state;
 }
@@ -80,7 +80,7 @@ export function storeTempCredentials(
   providerType: ProviderType,
   credentials: Record<string, string>,
 ): string {
-  const code = `cred_${uuidv4()}`;
+  const code = `cred_${randomUUID()}`;
   tempCredentialStore.set(code, { providerType, credentials, createdAt: Date.now() });
   return code;
 }
