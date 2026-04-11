@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import authRoutes from './routes/auth.routes';
 import legalRoutes from './routes/legal.routes';
 import providersRoutes from './routes/providers.routes';
+import filesRoutes from './routes/files.routes';
 import { errorMiddleware } from './middleware/error.middleware';
 
 const app = express();
@@ -26,6 +27,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
 app.use('/api/providers', providersRoutes);
+app.use('/api/files', filesRoutes);
 
 app.use(errorMiddleware);
 
