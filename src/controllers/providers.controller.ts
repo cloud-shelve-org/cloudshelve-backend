@@ -10,16 +10,16 @@ import {
 } from '../services/provider-adapters';
 import { AppError } from '../middleware/error.middleware';
 
-const ANDROID_PACKAGE = 'com.cloudshelve.app';
-
 /**
  * Serve an HTML page that returns the user to the app after OAuth consent.
  *
  * Platform behaviour:
  *  - Android Chrome Custom Tabs blocks window.location to custom schemes AND
  *    ignores plain 302 → custom-scheme redirects. The only reliable mechanism
- *    is the Android Intent URL format (intent://…#Intent;scheme=…;package=…;end),
- *    which Chrome Custom Tabs was specifically designed to handle.
+ *    is the Android Intent URL format (intent://…#Intent;scheme=…;end).
+ *    We intentionally omit the package so Android resolves by scheme alone —
+ *    this works for both Expo Go (host.exp.exponent) and production builds
+ *    (com.cloudshelve.app) without needing to know which is installed.
  *  - iOS ASWebAuthenticationSession intercepts custom-scheme redirects at the
  *    OS level before the browser sees them, so a plain cloudshelve:// URL works.
  *
@@ -29,11 +29,9 @@ function deepLinkRedirect(req: Request, res: Response, params: URLSearchParams) 
   const ua = req.headers['user-agent'] || '';
   const isAndroid = /Android/i.test(ua);
 
-  // Android intent URL: intent://<path>?<query>#Intent;scheme=<scheme>;package=<pkg>;end
-  // The scheme is excluded from the host/path portion; it goes in the fragment.
-  const intentUrl =
-    `intent://oauth/callback?${params}` +
-    `#Intent;scheme=cloudshelve;package=${ANDROID_PACKAGE};end`;
+  // No package= so Android matches by scheme only — works for both Expo Go
+  // and standalone/production builds.
+  const intentUrl = `intent://oauth/callback?${params}#Intent;scheme=cloudshelve;end`;
 
   // iOS / fallback plain deep link
   const deepLink = `cloudshelve://oauth/callback?${params}`;
