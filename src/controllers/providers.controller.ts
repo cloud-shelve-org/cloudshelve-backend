@@ -11,61 +11,21 @@ import {
 import { AppError } from '../middleware/error.middleware';
 
 /**
- * Serve an HTML page that returns the user to the app after OAuth consent.
+ * Redirect the user back to the app via the cloudshelve:// custom scheme.
  *
- * Platform behaviour:
- *  - Android Chrome Custom Tabs blocks window.location to custom schemes AND
- *    ignores plain 302 → custom-scheme redirects. The only reliable mechanism
- *    is the Android Intent URL format (intent://…#Intent;scheme=…;end).
- *    We intentionally omit the package so Android resolves by scheme alone —
- *    this works for both Expo Go (host.exp.exponent) and production builds
- *    (com.cloudshelve.app) without needing to know which is installed.
- *  - iOS ASWebAuthenticationSession intercepts custom-scheme redirects at the
- *    OS level before the browser sees them, so a plain cloudshelve:// URL works.
+ * A plain HTTP 302 to the custom scheme is the standard OAuth redirect pattern
+ * and is the only approach that works reliably with expo-web-browser's
+ * openAuthSessionAsync on both platforms:
+ *  - iOS  ASWebAuthenticationSession intercepts the 302 at OS level.
+ *  - Android  Chrome Custom Tabs (launched by openAuthSessionAsync) monitors
+ *    for the registered scheme and closes the session when it sees a navigation
+ *    to cloudshelve://, returning the URL to the calling JS promise.
  *
- * We detect the platform from User-Agent and serve the appropriate URL.
+ * The intent:// URL format is only needed when opening a standalone Chrome
+ * window — not within openAuthSessionAsync's managed Custom Tabs session.
  */
-function deepLinkRedirect(req: Request, res: Response, params: URLSearchParams) {
-  const ua = req.headers['user-agent'] || '';
-  const isAndroid = /Android/i.test(ua);
-
-  // No package= so Android matches by scheme only — works for both Expo Go
-  // and standalone/production builds.
-  const intentUrl = `intent://oauth/callback?${params}#Intent;scheme=cloudshelve;end`;
-
-  // iOS / fallback plain deep link
-  const deepLink = `cloudshelve://oauth/callback?${params}`;
-
-  const redirectUrl = isAndroid ? intentUrl : deepLink;
-
-  // Chrome Custom Tabs (Android) blocks window.location.replace() for intent://
-  // URLs as a security measure — only user-gesture navigations are allowed.
-  // Synthesising a click() on an <a> element counts as a user gesture and works
-  // reliably. iOS ASWebAuthenticationSession intercepts the custom scheme at OS
-  // level before the page finishes loading, so the click fires as a fast fallback.
-  res.type('html').send(`<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Redirecting…</title>
-<style>
-  body { font-family: -apple-system, sans-serif; display: flex; align-items: center;
-         justify-content: center; min-height: 100vh; margin: 0; background: #0f0f11; color: #e4e4e7; }
-  p { font-size: 15px; color: #71717a; }
-</style>
-</head>
-<body>
-<p>Redirecting back to CloudShelve…</p>
-<a id="dl" href="${redirectUrl}" style="display:none">open app</a>
-<script>
-  // Trigger via click (user-gesture equivalent) so Chrome allows intent:// navigation.
-  document.getElementById('dl').click();
-  // Belt-and-suspenders: if click didn't work within 1 s, make the link visible.
-  setTimeout(function() { document.getElementById('dl').style.display = 'block'; }, 1000);
-</script>
-</body>
-</html>`);
+function deepLinkRedirect(_req: Request, res: Response, params: URLSearchParams) {
+  res.redirect(`cloudshelve://oauth/callback?${params}`);
 }
 
 function badRequest(message: string): AppError {
