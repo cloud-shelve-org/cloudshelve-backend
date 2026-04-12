@@ -36,6 +36,7 @@ export async function listFiles(
     case 'onedrive':     return listOneDriveFiles(accessToken, folderId, pageToken, pageSize);
     case 'dropbox':      return listDropboxFiles(accessToken, folderId, pageToken, pageSize);
     case 'box':          return listBoxFiles(accessToken, folderId, pageToken, pageSize);
+    case 'mega':         return listMegaFiles(accessToken, folderId, pageToken, pageSize);
     default: throw new Error(`File listing not supported for ${providerType}`);
   }
 }
@@ -52,6 +53,7 @@ export async function searchFiles(
     case 'onedrive':     return searchOneDriveFiles(accessToken, query, pageToken, pageSize);
     case 'dropbox':      return searchDropboxFiles(accessToken, query, pageToken, pageSize);
     case 'box':          return searchBoxFiles(accessToken, query, pageToken, pageSize);
+    case 'mega':         return searchMegaFiles(accessToken, query, pageToken, pageSize);
     default: throw new Error(`File search not supported for ${providerType}`);
   }
 }
@@ -67,6 +69,7 @@ export async function createFolder(
     case 'onedrive':     return createOneDriveFolder(accessToken, parentId, name);
     case 'dropbox':      return createDropboxFolder(accessToken, parentId, name);
     case 'box':          return createBoxFolder(accessToken, parentId, name);
+    case 'mega':         return createMegaFolder(accessToken, parentId, name);
     default: throw new Error(`Folder creation not supported for ${providerType}`);
   }
 }
@@ -82,6 +85,7 @@ export async function deleteFile(
     case 'onedrive':     return deleteOneDriveFile(accessToken, fileId);
     case 'dropbox':      return deleteDropboxFile(accessToken, filePath || fileId);
     case 'box':          return deleteBoxFile(accessToken, fileId);
+    case 'mega':         return deleteMegaFile(accessToken, fileId);
     default: throw new Error(`File deletion not supported for ${providerType}`);
   }
 }
@@ -98,6 +102,7 @@ export async function renameFile(
     case 'onedrive':     return renameOneDriveFile(accessToken, fileId, newName);
     case 'dropbox':      return renameDropboxFile(accessToken, fileId, newName, filePath);
     case 'box':          return renameBoxFile(accessToken, fileId, newName);
+    case 'mega':         return renameMegaFile(accessToken, fileId, newName);
     default: throw new Error(`Rename not supported for ${providerType}`);
   }
 }
@@ -115,6 +120,7 @@ export async function uploadFile(
     case 'onedrive':     return uploadOneDriveFile(accessToken, parentId, fileName, mimeType, buffer);
     case 'dropbox':      return uploadDropboxFile(accessToken, parentId, fileName, buffer);
     case 'box':          return uploadBoxFile(accessToken, parentId, fileName, mimeType, buffer);
+    case 'mega':         return uploadMegaFile(accessToken, parentId, fileName, buffer);
     default: throw new Error(`File upload not supported for ${providerType}`);
   }
 }
@@ -137,6 +143,7 @@ export async function downloadFile(
     case 'onedrive':     return downloadOneDriveFile(accessToken, fileId, fileName);
     case 'dropbox':      return downloadDropboxFile(accessToken, filePath || fileId, fileName);
     case 'box':          return downloadBoxFile(accessToken, fileId, fileName);
+    case 'mega':         return downloadMegaFile(accessToken, fileId, fileName);
     default: throw new Error(`File download not supported for ${providerType}`);
   }
 }
@@ -721,4 +728,202 @@ function mapBoxItem(f: any): FileItem {
     path: null,
     parentId: f.parent?.id || null,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEGA
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Open a megajs Storage session and call `fn` with it, then close.
+ * `credentialsJson` is a JSON string containing `{ email, password }`.
+ */
+function withMegaStorage<T>(
+  credentialsJson: string,
+  fn: (storage: any) => Promise<T>,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const { email, password } = JSON.parse(credentialsJson);
+    const megajs = require('megajs');
+    const Storage = megajs.Storage ?? megajs.default?.Storage ?? megajs;
+
+    const storage = new Storage(
+      { email, password, autologin: true, autoload: true },
+      async (err: Error | null) => {
+        if (err) return reject(new Error('MEGA login failed: ' + err.message));
+        try {
+          const result = await fn(storage);
+          resolve(result);
+        } catch (e) {
+          reject(e);
+        } finally {
+          try { storage.close(); } catch { /* ignore */ }
+        }
+      },
+    );
+
+    setTimeout(() => reject(new Error('MEGA login timeout')), 20_000);
+  });
+}
+
+function mapMegaNode(node: any, parentId: string | null): FileItem {
+  const isFolder = node.directory === true || node.type === 1;
+  return {
+    id: node.nodeId,
+    name: node.name ?? '(unnamed)',
+    kind: isFolder ? 'folder' : 'file',
+    mimeType: isFolder ? null : 'application/octet-stream',
+    size: isFolder ? null : (node.size ?? null),
+    modifiedAt: node.timestamp ? new Date(node.timestamp * 1000).toISOString() : null,
+    thumbnailUrl: null,
+    downloadUrl: null,
+    path: null,
+    parentId,
+  };
+}
+
+async function listMegaFiles(
+  credentialsJson: string,
+  folderId: string | null,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    let parent: any;
+    if (folderId) {
+      parent = storage.files[folderId];
+      if (!parent) throw new Error('Folder not found');
+    } else {
+      parent = storage.root;
+    }
+
+    const children: any[] = parent.children ?? [];
+    const offset = pageToken ? parseInt(pageToken, 10) : 0;
+    const page = children.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    const nextPageToken = nextOffset < children.length ? String(nextOffset) : null;
+
+    return {
+      items: page.map((n: any) => mapMegaNode(n, folderId)),
+      nextPageToken,
+    };
+  });
+}
+
+async function searchMegaFiles(
+  credentialsJson: string,
+  query: string,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const lq = query.toLowerCase();
+    const all: any[] = Object.values(storage.files).filter(
+      (n: any) => n.name && n.name.toLowerCase().includes(lq),
+    );
+
+    const offset = pageToken ? parseInt(pageToken, 10) : 0;
+    const page = all.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    const nextPageToken = nextOffset < all.length ? String(nextOffset) : null;
+
+    return {
+      items: page.map((n: any) => mapMegaNode(n, n.parent?.nodeId ?? null)),
+      nextPageToken,
+    };
+  });
+}
+
+async function createMegaFolder(
+  credentialsJson: string,
+  parentId: string | null,
+  name: string,
+): Promise<FileItem> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const parent = parentId ? storage.files[parentId] : storage.root;
+    if (!parent) throw new Error('Parent folder not found');
+
+    const newFolder = await new Promise<any>((res, rej) => {
+      parent.mkdir(name, (err: Error | null, folder: any) => {
+        if (err) return rej(err);
+        res(folder);
+      });
+    });
+
+    return mapMegaNode(newFolder, parentId);
+  });
+}
+
+async function deleteMegaFile(
+  credentialsJson: string,
+  fileId: string,
+): Promise<void> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const node = storage.files[fileId];
+    if (!node) throw new Error('File not found');
+    await new Promise<void>((res, rej) => {
+      node.delete(false, (err: Error | null) => {
+        if (err) return rej(err);
+        res();
+      });
+    });
+  });
+}
+
+async function renameMegaFile(
+  credentialsJson: string,
+  fileId: string,
+  newName: string,
+): Promise<FileItem> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const node = storage.files[fileId];
+    if (!node) throw new Error('File not found');
+    await new Promise<void>((res, rej) => {
+      node.rename(newName, (err: Error | null) => {
+        if (err) return rej(err);
+        res();
+      });
+    });
+    return mapMegaNode(node, node.parent?.nodeId ?? null);
+  });
+}
+
+async function uploadMegaFile(
+  credentialsJson: string,
+  parentId: string | null,
+  fileName: string,
+  buffer: Buffer,
+): Promise<FileItem> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const parent = parentId ? storage.files[parentId] : storage.root;
+    if (!parent) throw new Error('Parent folder not found');
+
+    const uploadStream = parent.upload({ name: fileName, size: buffer.length }, buffer);
+    const uploaded: any = await uploadStream.complete;
+    return mapMegaNode(uploaded, parentId);
+  });
+}
+
+async function downloadMegaFile(
+  credentialsJson: string,
+  fileId: string,
+  fileName: string,
+): Promise<DownloadResult> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const node = storage.files[fileId];
+    if (!node) throw new Error('File not found');
+
+    const buffer: Buffer = await new Promise((res, rej) => {
+      node.downloadBuffer({}, (err: Error | null, data: Buffer) => {
+        if (err) return rej(err);
+        res(data);
+      });
+    });
+
+    return {
+      buffer,
+      contentType: 'application/octet-stream',
+      fileName,
+    };
+  });
 }

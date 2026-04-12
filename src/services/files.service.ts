@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '../config/supabase';
 import { decryptCredentials, encryptCredentials } from '../lib/credentials-crypto';
-import { refreshAccessToken, type OAuthTokens, type ProviderType } from './provider-adapters';
+import { refreshAccessToken, type OAuthTokens, type ProviderType, isCredentialProvider } from './provider-adapters';
 import {
   listFiles as adapterListFiles,
   searchFiles as adapterSearchFiles,
@@ -44,6 +44,13 @@ async function resolveAccessToken(
 
   const providerType = mapDbType(row.type);
   const credentials = decryptCredentials(row.credentials);
+
+  // Credential-based providers (MEGA, AWS S3) don't use OAuth tokens.
+  // Pass the raw credentials as a JSON string so the file adapter can use them.
+  if (isCredentialProvider(providerType)) {
+    return { accessToken: JSON.stringify(credentials), providerType };
+  }
+
   const { access_token, refresh_token, expires_at } = credentials as OAuthTokens;
 
   if (!access_token) {
