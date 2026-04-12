@@ -38,17 +38,32 @@ function deepLinkRedirect(req: Request, res: Response, params: URLSearchParams) 
 
   const redirectUrl = isAndroid ? intentUrl : deepLink;
 
+  // Chrome Custom Tabs (Android) blocks window.location.replace() for intent://
+  // URLs as a security measure — only user-gesture navigations are allowed.
+  // Synthesising a click() on an <a> element counts as a user gesture and works
+  // reliably. iOS ASWebAuthenticationSession intercepts the custom scheme at OS
+  // level before the page finishes loading, so the click fires as a fast fallback.
   res.type('html').send(`<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Redirecting…</title>
-<script>window.location.replace(${JSON.stringify(redirectUrl)});</script>
+<style>
+  body { font-family: -apple-system, sans-serif; display: flex; align-items: center;
+         justify-content: center; min-height: 100vh; margin: 0; background: #0f0f11; color: #e4e4e7; }
+  p { font-size: 15px; color: #71717a; }
+</style>
 </head>
 <body>
 <p>Redirecting back to CloudShelve…</p>
-<p><a href="${redirectUrl}">Tap here if you are not redirected</a></p>
+<a id="dl" href="${redirectUrl}" style="display:none">open app</a>
+<script>
+  // Trigger via click (user-gesture equivalent) so Chrome allows intent:// navigation.
+  document.getElementById('dl').click();
+  // Belt-and-suspenders: if click didn't work within 1 s, make the link visible.
+  setTimeout(function() { document.getElementById('dl').style.display = 'block'; }, 1000);
+</script>
 </body>
 </html>`);
 }
