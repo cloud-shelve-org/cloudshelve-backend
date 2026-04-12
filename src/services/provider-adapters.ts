@@ -260,20 +260,26 @@ export async function validateMegaCredentials(
         (err: Error | null) => {
           if (err) return reject(new Error('Invalid MEGA credentials'));
 
-          const spaceUsed = (storage as any).state?.usedStorage || 0;
-          const spaceTotal = 20 * 1024 * 1024 * 1024; // MEGA free tier = 20 GB
+          // Use getAccountInfo() to fetch real quota via the MEGA `uq` API.
+          // storage.state?.usedStorage does not exist in megajs.
+          (storage as any).getAccountInfo((infoErr: Error | null, account: any) => {
+            const spaceUsed = !infoErr && account ? (account.spaceUsed ?? 0) : 0;
+            const spaceTotal = !infoErr && account
+              ? (account.spaceTotal ?? 20 * 1024 * 1024 * 1024)
+              : 20 * 1024 * 1024 * 1024;
 
-          try {
-            storage.close();
-          } catch {
-            /* ignore */
-          }
+            try {
+              storage.close();
+            } catch {
+              /* ignore */
+            }
 
-          resolve({
-            email,
-            displayName: `MEGA (${email})`,
-            storageUsed: spaceUsed,
-            storageTotal: spaceTotal,
+            resolve({
+              email,
+              displayName: `MEGA (${email})`,
+              storageUsed: spaceUsed,
+              storageTotal: spaceTotal,
+            });
           });
         },
       );
