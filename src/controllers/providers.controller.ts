@@ -11,21 +11,47 @@ import {
 import { AppError } from '../middleware/error.middleware';
 
 /**
- * Redirect the user back to the app via the cloudshelve:// custom scheme.
+ * Return the user to the app by navigating to the cloudshelve:// custom scheme.
  *
- * A plain HTTP 302 to the custom scheme is the standard OAuth redirect pattern
- * and is the only approach that works reliably with expo-web-browser's
- * openAuthSessionAsync on both platforms:
- *  - iOS  ASWebAuthenticationSession intercepts the 302 at OS level.
- *  - Android  Chrome Custom Tabs (launched by openAuthSessionAsync) monitors
- *    for the registered scheme and closes the session when it sees a navigation
- *    to cloudshelve://, returning the URL to the calling JS promise.
+ * We serve an HTML page that immediately clicks a <cloudshelve://> link rather
+ * than issuing a plain 302, because Chrome Custom Tabs blocks HTTP redirects from
+ * HTTPS to custom-scheme URIs (Chrome 75+ security restriction).
  *
- * The intent:// URL format is only needed when opening a standalone Chrome
- * window — not within openAuthSessionAsync's managed Custom Tabs session.
+ * Platform behaviour:
+ *  - Android Custom Tabs: Chrome allows JS-initiated navigation to plain custom
+ *    schemes (e.g. cloudshelve://). The synchronous .click() counts as a
+ *    user-activation–like gesture. Android routes the URL to MainActivity via
+ *    onNewIntent, which fires Linking's 'url' event and resolves
+ *    openAuthSessionAsync's _waitForRedirectAsync promise.
+ *    Note: intent:// is NOT used here — Chrome Custom Tabs blocks JS navigation
+ *    to intent:// URLs as a security measure; only plain custom schemes work.
+ *  - iOS ASWebAuthenticationSession: Intercepts any navigation to the custom
+ *    scheme at OS level before the browser can act on it, so the link click is
+ *    caught immediately and the session resolves.
  */
 function deepLinkRedirect(_req: Request, res: Response, params: URLSearchParams) {
-  res.redirect(`cloudshelve://oauth/callback?${params}`);
+  const deepLink = `cloudshelve://oauth/callback?${params}`;
+  res.type('html').send(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Redirecting…</title>
+<style>
+  body { font-family: -apple-system, sans-serif; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; min-height: 100vh; margin: 0;
+         background: #0f0f11; color: #e4e4e7; gap: 16px; padding: 24px; }
+  p { font-size: 15px; color: #71717a; margin: 0; }
+  a { display: inline-block; padding: 14px 28px; background: #7c3aed; color: #fff;
+      border-radius: 12px; font-size: 15px; font-weight: 600; text-decoration: none; }
+</style>
+</head>
+<body>
+<p>Redirecting back to CloudShelve…</p>
+<a id="dl" href="${deepLink}">Open CloudShelve</a>
+<script>document.getElementById('dl').click();</script>
+</body>
+</html>`);
 }
 
 function badRequest(message: string): AppError {
