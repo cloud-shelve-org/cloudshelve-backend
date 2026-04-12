@@ -321,7 +321,7 @@ function googleAuthUrl(redirectUri: string, state: string): string {
     redirect_uri: redirectUri,
     response_type: 'code',
     scope: [
-      'https://www.googleapis.com/auth/drive.metadata.readonly',
+      'https://www.googleapis.com/auth/drive',
       'https://www.googleapis.com/auth/userinfo.email',
       'https://www.googleapis.com/auth/userinfo.profile',
     ].join(' '),
