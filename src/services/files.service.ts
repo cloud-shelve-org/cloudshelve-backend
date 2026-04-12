@@ -8,6 +8,7 @@ import {
   deleteFile as adapterDeleteFile,
   renameFile as adapterRenameFile,
   uploadFile as adapterUploadFile,
+  downloadFile as adapterDownloadFile,
 } from './files-adapters';
 
 const DB_TYPE_TO_API: Record<string, ProviderType> = {
@@ -144,4 +145,15 @@ export async function uploadProviderFile(
 ) {
   const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
   return adapterUploadFile(providerType, accessToken, parentId, fileName, mimeType, buffer);
+}
+
+export async function downloadProviderFile(
+  userId: string,
+  providerId: string,
+  fileId: string,
+  fileName: string,
+  filePath?: string | null,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterDownloadFile(providerType, accessToken, fileId, fileName, filePath);
 }

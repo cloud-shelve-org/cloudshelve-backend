@@ -119,6 +119,28 @@ export async function uploadFile(
   }
 }
 
+export interface DownloadResult {
+  buffer: Buffer;
+  contentType: string;
+  fileName: string;
+}
+
+export async function downloadFile(
+  providerType: ProviderType,
+  accessToken: string,
+  fileId: string,
+  fileName: string,
+  filePath?: string | null,
+): Promise<DownloadResult> {
+  switch (providerType) {
+    case 'google_drive': return downloadGoogleDriveFile(accessToken, fileId, fileName);
+    case 'onedrive':     return downloadOneDriveFile(accessToken, fileId, fileName);
+    case 'dropbox':      return downloadDropboxFile(accessToken, filePath || fileId, fileName);
+    case 'box':          return downloadBoxFile(accessToken, fileId, fileName);
+    default: throw new Error(`File download not supported for ${providerType}`);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GOOGLE DRIVE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -246,6 +268,16 @@ async function uploadGoogleDriveFile(
   return mapGoogleDriveItem(await resp.json());
 }
 
+async function downloadGoogleDriveFile(accessToken: string, fileId: string, fileName: string): Promise<DownloadResult> {
+  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error(`Google Drive download failed: ${resp.status} ${await resp.text()}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const contentType = resp.headers.get('content-type') || 'application/octet-stream';
+  return { buffer, contentType, fileName };
+}
+
 function mapGoogleDriveItem(f: any): FileItem {
   const isFolder = f.mimeType === GDRIVE_FOLDER_MIME;
   return {
@@ -356,6 +388,17 @@ async function uploadOneDriveFile(
   });
   if (!resp.ok) throw new Error(`OneDrive upload failed: ${await resp.text()}`);
   return mapOneDriveItem(await resp.json());
+}
+
+async function downloadOneDriveFile(accessToken: string, fileId: string, fileName: string): Promise<DownloadResult> {
+  // Graph /content returns a 302 redirect to a CDN URL; fetch follows it automatically
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error(`OneDrive download failed: ${resp.status} ${await resp.text()}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const contentType = resp.headers.get('content-type') || 'application/octet-stream';
+  return { buffer, contentType, fileName };
 }
 
 function mapOneDriveItem(f: any): FileItem {
@@ -507,6 +550,21 @@ async function uploadDropboxFile(
   return mapDropboxItem(await resp.json());
 }
 
+async function downloadDropboxFile(accessToken: string, filePath: string, fileName: string): Promise<DownloadResult> {
+  const resp = await fetch('https://content.dropboxapi.com/2/files/download', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Dropbox-API-Arg': JSON.stringify({ path: filePath.startsWith('id:') ? filePath : filePath }),
+      'Content-Type': 'text/plain; charset=dropbox-cors-hack',
+    },
+  });
+  if (!resp.ok) throw new Error(`Dropbox download failed: ${resp.status} ${await resp.text()}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const contentType = resp.headers.get('content-type') || 'application/octet-stream';
+  return { buffer, contentType, fileName };
+}
+
 function mapDropboxItem(f: any): FileItem {
   const isFolder = f['.tag'] === 'folder';
   return {
@@ -636,6 +694,17 @@ async function uploadBoxFile(
   if (!resp.ok) throw new Error(`Box upload failed: ${await resp.text()}`);
   const data: any = await resp.json();
   return mapBoxItem(data.entries?.[0] || data);
+}
+
+async function downloadBoxFile(accessToken: string, fileId: string, fileName: string): Promise<DownloadResult> {
+  // Box /content returns a 302 redirect; fetch follows automatically
+  const resp = await fetch(`https://api.box.com/2.0/files/${fileId}/content`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error(`Box download failed: ${resp.status} ${await resp.text()}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const contentType = resp.headers.get('content-type') || 'application/octet-stream';
+  return { buffer, contentType, fileName };
 }
 
 function mapBoxItem(f: any): FileItem {

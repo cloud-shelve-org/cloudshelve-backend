@@ -8,6 +8,7 @@ import {
   deleteProviderFile,
   renameProviderFile,
   uploadProviderFile,
+  downloadProviderFile,
 } from '../services/files.service';
 
 // ─── Multer: in-memory storage, 50 MB limit ───────────────────────────────────
@@ -114,5 +115,30 @@ export async function uploadFile(req: Request, res: Response, next: NextFunction
     const { originalname, mimetype, buffer } = req.file;
     const data = await uploadProviderFile(req.user!.id, String(req.params.providerId), parentId, originalname, mimetype, buffer);
     res.status(201).json({ success: true, data });
+  } catch (err) { next(err); }
+}
+
+const downloadQuerySchema = z.object({
+  name: z.string().min(1),
+  path: z.string().optional().nullable(),
+});
+
+/** GET /api/files/:providerId/:fileId/download?name=filename&path=... */
+export async function downloadFile(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = downloadQuerySchema.safeParse(req.query);
+    if (!parsed.success) { res.status(400).json({ success: false, error: parsed.error.issues[0].message }); return; }
+    const { name, path } = parsed.data;
+    const { buffer, contentType, fileName } = await downloadProviderFile(
+      req.user!.id,
+      String(req.params.providerId),
+      String(req.params.fileId),
+      name,
+      path ?? null,
+    );
+    res.set('Content-Type', contentType);
+    res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    res.set('Content-Length', String(buffer.length));
+    res.send(buffer);
   } catch (err) { next(err); }
 }
