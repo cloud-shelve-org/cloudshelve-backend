@@ -189,7 +189,7 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
     }
 
     const completedAt = new Date().toISOString();
-    const isOnce      = cfg.schedule?.frequency === 'once';
+    const isOnce      = !cfg.schedule || cfg.schedule.frequency === 'once' || cfg.schedule.frequency === 'immediate';
 
     if (isOnce) {
       await patchTask(taskId, 100, {

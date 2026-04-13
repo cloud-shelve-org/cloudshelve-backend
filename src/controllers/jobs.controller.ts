@@ -62,6 +62,16 @@ export async function deleteJob(req: Request, res: Response, next: NextFunction)
   }
 }
 
+/** POST /api/jobs/:id/retry — Re-queue a failed or cancelled job. */
+export async function retryJob(req: Request, res: Response, next: NextFunction) {
+  try {
+    const data = await jobsService.retryJob(req.user!.id, String(req.params.id));
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
 /**
  * DELETE /api/jobs — Clear completed/failed/cancelled jobs.
  * Requires query: ?filter=completed

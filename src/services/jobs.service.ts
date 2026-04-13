@@ -48,6 +48,8 @@ function dbRowToJob(row: any): any {
 // ─── computeNextRunAt (timezone-aware via dayjs) ──────────────────────────────
 
 export function computeNextRunAt(schedule: any): Date {
+  if (schedule.frequency === 'immediate') return new Date();
+
   const tz = schedule.timezone || 'UTC';
   const [hh, mm] = (schedule.time as string).split(':').map(Number);
 
@@ -59,6 +61,9 @@ export function computeNextRunAt(schedule: any): Date {
   let candidate: dayjs.Dayjs;
 
   switch (schedule.frequency) {
+    case 'immediate': {
+      return new Date();
+    }
     case 'once': {
       if (!schedule.date) throw new Error("'once' schedule requires a date");
       candidate = dayjs.tz(
@@ -244,6 +249,52 @@ export async function deleteJob(userId: string, taskId: string): Promise<void> {
   if (row.bull_job_id) await removeJobById(row.bull_job_id).catch(() => {});
 
   await supabaseAdmin.from('tasks').delete().eq('id', taskId);
+}
+
+export async function retryJob(userId: string, taskId: string): Promise<any> {
+  const { data: row, error } = await supabaseAdmin
+    .from('tasks')
+    .select('*')
+    .eq('id', taskId)
+    .eq('user_id', userId)
+    .single();
+
+  if (error || !row) {
+    const err: any = new Error('Job not found');
+    err.statusCode  = 404;
+    throw err;
+  }
+
+  if (row.status !== 'failed' && row.status !== 'cancelled') {
+    const err: any = new Error('Only failed or cancelled jobs can be retried');
+    err.statusCode  = 400;
+    throw err;
+  }
+
+  const cfg       = row.config ?? {};
+  const isImmediate = !cfg.schedule || cfg.schedule.frequency === 'immediate';
+  const nextRunAt   = isImmediate ? new Date() : computeNextRunAt(cfg.schedule);
+  const delay       = Math.max(0, nextRunAt.getTime() - Date.now());
+  const bullJobId   = await addDelayedJob(taskId, userId, delay);
+
+  const newConfig = {
+    ...cfg,
+    is_active:    true,
+    error_message: null,
+    ...(isImmediate ? {} : { next_run_at: nextRunAt.toISOString() }),
+  };
+
+  await supabaseAdmin
+    .from('tasks')
+    .update({
+      status:        'pending',
+      error_message: null,
+      bull_job_id:   bullJobId,
+      config:        newConfig,
+    })
+    .eq('id', taskId);
+
+  return dbRowToJob({ ...row, status: 'pending', error_message: null, bull_job_id: bullJobId, config: newConfig });
 }
 
 export async function clearCompletedJobs(userId: string): Promise<void> {

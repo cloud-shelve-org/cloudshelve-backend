@@ -5,6 +5,7 @@ import {
   createJob,
   toggleJob,
   cancelJob,
+  retryJob,
   deleteJob,
   clearJobs,
 } from '../controllers/jobs.controller';
@@ -17,6 +18,7 @@ router.post(  '/',           authMiddleware, createJob);
 router.delete('/',           authMiddleware, clearJobs);
 router.patch( '/:id/toggle', authMiddleware, toggleJob);
 router.post(  '/:id/cancel', authMiddleware, cancelJob);
+router.post(  '/:id/retry',  authMiddleware, retryJob);
 router.delete('/:id',        authMiddleware, deleteJob);
 
 export default router;
