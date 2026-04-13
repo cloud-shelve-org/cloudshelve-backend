@@ -37,11 +37,13 @@ function dbRowToJob(row: any): any {
     progress:                   (row.progress ?? 0) / 100,
     filesProcessed:             cfg.files_processed             ?? null,
     totalFiles:                 cfg.total_files                 ?? null,
+    skippedFiles:               cfg.skipped_files               ?? null,
     currentFile:                cfg.current_file                ?? null,
     estimatedSecondsRemaining:  cfg.estimated_seconds_remaining ?? null,
     createdAt:                  row.created_at,
     updatedAt:                  row.updated_at,
     error:                      row.error_message ?? null,
+    warning:                    cfg.warning                     ?? null,
   };
 }
 

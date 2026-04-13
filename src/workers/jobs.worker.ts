@@ -9,7 +9,7 @@ import {
   uploadProviderFile,
   deleteProviderFile,
 } from '../services/files.service';
-import { GDriveNotExportableError } from '../services/files-adapters';
+import { GDriveNotExportableError, type GDriveSkipReason } from '../services/files-adapters';
 import type { FileItem } from '../services/files-adapters';
 
 // ─── Error humanisation ───────────────────────────────────────────────────────
@@ -58,6 +58,32 @@ function friendlyError(err: any): string {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function fileList(names: string[]): string {
+  if (names.length === 0) return '';
+  if (names.length <= 3) return names.map((n) => `"${n}"`).join(', ');
+  return `"${names[0]}", "${names[1]}", "${names[2]}" and ${names.length - 3} more`;
+}
+
+function buildSkipWarning(byReason: Record<string, string[]>): string | null {
+  const parts: string[] = [];
+
+  const restricted = byReason['download_restricted'] ?? [];
+  if (restricted.length > 0) {
+    parts.push(
+      `${restricted.length} file${restricted.length > 1 ? 's' : ''} could not be copied because they are shared with download restrictions: ${fileList(restricted)}.`,
+    );
+  }
+
+  const notExportable = byReason['not_exportable'] ?? [];
+  if (notExportable.length > 0) {
+    parts.push(
+      `${notExportable.length} file${notExportable.length > 1 ? 's' : ''} were skipped because Google Drive does not support exporting their file type: ${fileList(notExportable)}.`,
+    );
+  }
+
+  return parts.length > 0 ? parts.join(' ') : null;
+}
 
 /** Collect every non-folder item in a provider folder (walks all pages). */
 async function collectFiles(
@@ -143,6 +169,10 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
 
     const t0 = Date.now();
     let skipped = 0;
+    const skippedByReason: Record<GDriveSkipReason, string[]> = {
+      download_restricted: [],
+      not_exportable:      [],
+    };
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -191,7 +221,9 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
         }
       } catch (fileErr: any) {
         if (fileErr instanceof GDriveNotExportableError || fileErr?.code === 'GDRIVE_NOT_EXPORTABLE') {
-          console.warn(`[jobs-worker] Task ${taskId}: skipping non-exportable file "${file.name}"`);
+          const reason: GDriveSkipReason = fileErr.reason ?? 'not_exportable';
+          console.warn(`[jobs-worker] Task ${taskId}: skipping "${file.name}" (${reason})`);
+          skippedByReason[reason].push(file.name);
           skipped++;
           continue;
         }
@@ -202,17 +234,24 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
     const completedAt = new Date().toISOString();
     const isOnce      = !cfg.schedule || cfg.schedule.frequency === 'once' || cfg.schedule.frequency === 'immediate';
 
+    // Build a human-readable warning if any files were skipped
+    const warning = buildSkipWarning(skippedByReason);
+
+    const completionConfigPatch = {
+      files_processed:             total - skipped,
+      skipped_files:               skipped,
+      warning,
+      current_file:                null,
+      estimated_seconds_remaining: null,
+    };
+
     if (isOnce) {
-      await patchTask(taskId, 100, {
-        files_processed:             total,
-        current_file:                null,
-        estimated_seconds_remaining: null,
-      });
+      await patchTask(taskId, 100, completionConfigPatch);
       await supabaseAdmin
         .from('tasks')
         .update({ status: 'completed', progress: 100, completed_at: completedAt, bull_job_id: null })
         .eq('id', taskId);
-      console.log(`[jobs-worker] Task ${taskId} completed (once)`);
+      console.log(`[jobs-worker] Task ${taskId} completed (once)${skipped ? `, ${skipped} skipped` : ''}`);
     } else {
       // Recurring: reset and schedule next run
       const nextRunAt  = computeNextRunAt(cfg.schedule);
@@ -220,18 +259,16 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
       const newBullId  = await addDelayedJob(taskId, userId, delay);
       const newConfig  = {
         ...cfg,
-        next_run_at:                 nextRunAt.toISOString(),
-        last_run_at:                 completedAt,
-        files_processed:             total,
-        total_files:                 total,
-        current_file:                null,
-        estimated_seconds_remaining: null,
+        ...completionConfigPatch,
+        next_run_at: nextRunAt.toISOString(),
+        last_run_at: completedAt,
+        total_files: total,
       };
       await supabaseAdmin
         .from('tasks')
         .update({ status: 'pending', progress: 0, bull_job_id: newBullId, config: newConfig })
         .eq('id', taskId);
-      console.log(`[jobs-worker] Task ${taskId} done; next run at ${nextRunAt.toISOString()}`);
+      console.log(`[jobs-worker] Task ${taskId} done; next run at ${nextRunAt.toISOString()}${skipped ? `, ${skipped} skipped` : ''}`);
     }
   } catch (err: any) {
     console.error(`[jobs-worker] Task ${taskId} failed:`, err);

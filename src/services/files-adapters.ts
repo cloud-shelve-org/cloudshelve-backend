@@ -170,6 +170,8 @@ async function listGoogleDriveFiles(
     fields: GDRIVE_FIELDS,
     orderBy: 'folder,name',
     pageSize: String(pageSize),
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
     ...(pageToken ? { pageToken } : {}),
   });
   const resp = await fetch(
@@ -293,19 +295,28 @@ const GDRIVE_EXPORT_MIME: Record<string, { mime: string; ext: string } | null> =
   'application/vnd.google-apps.shortcut':     null,
 };
 
-/** Thrown when a Workspace file has no exportable format — the worker should skip it. */
+export type GDriveSkipReason = 'download_restricted' | 'not_exportable';
+
+/** Thrown when a file cannot be downloaded/exported — the worker should skip it, not abort. */
 export class GDriveNotExportableError extends Error {
-  readonly code = 'GDRIVE_NOT_EXPORTABLE' as const;
-  constructor(fileName: string, mimeType: string) {
-    super(`"${fileName}" (${mimeType}) cannot be exported from Google Drive and was skipped.`);
+  readonly code   = 'GDRIVE_NOT_EXPORTABLE' as const;
+  readonly reason : GDriveSkipReason;
+  constructor(fileName: string, mimeType: string, reason: GDriveSkipReason = 'not_exportable') {
+    super(`"${fileName}" (${mimeType}) skipped: ${reason}`);
+    this.reason = reason;
   }
 }
 
 async function downloadGoogleDriveFile(accessToken: string, fileId: string, fileName: string): Promise<DownloadResult> {
   const headers = { Authorization: `Bearer ${accessToken}` };
 
-  // Attempt direct binary download
-  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers });
+  // Attempt direct binary download.
+  // supportsAllDrives=true  — required for files in shared/team drives.
+  // acknowledgeAbuse=true   — bypasses the virus-scan warning for large files.
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`,
+    { headers },
+  );
 
   if (resp.ok) {
     const buffer = Buffer.from(await resp.arrayBuffer());
@@ -328,13 +339,20 @@ async function downloadGoogleDriveFile(accessToken: string, fileId: string, file
   const meta = await metaResp.json() as { mimeType?: string; name?: string };
   const mimeType = meta.mimeType ?? '';
 
-  // undefined = unknown Workspace type (try PDF); null = known non-exportable
+  // The export endpoint only works for Google Workspace types (vnd.google-apps.*).
+  // Regular files (PDF, DOCX, images, etc.) that failed ?alt=media have download
+  // restrictions set on them — they cannot be copied and must be skipped.
+  if (!mimeType.startsWith('application/vnd.google-apps.')) {
+    throw new GDriveNotExportableError(fileName, mimeType, 'download_restricted');
+  }
+
+  // undefined = unknown Workspace type (fall back to PDF); null = known non-exportable
   const exportEntry = Object.prototype.hasOwnProperty.call(GDRIVE_EXPORT_MIME, mimeType)
     ? GDRIVE_EXPORT_MIME[mimeType]
     : undefined;
 
   if (exportEntry === null) {
-    throw new GDriveNotExportableError(fileName, mimeType);
+    throw new GDriveNotExportableError(fileName, mimeType, 'not_exportable');
   }
 
   const exportMime = exportEntry?.mime ?? 'application/pdf';
@@ -345,8 +363,7 @@ async function downloadGoogleDriveFile(accessToken: string, fileId: string, file
     { headers },
   );
   if (!exportResp.ok) {
-    // 400 means this specific file/type can't be converted — skip rather than abort
-    if (exportResp.status === 400) throw new GDriveNotExportableError(fileName, mimeType);
+    if (exportResp.status === 400) throw new GDriveNotExportableError(fileName, mimeType, 'not_exportable');
     throw new Error(`Google Drive export failed: ${exportResp.status} ${await exportResp.text()}`);
   }
 
