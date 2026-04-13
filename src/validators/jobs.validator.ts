@@ -13,6 +13,7 @@ const jobLocationSchema = z.object({
 const scheduleSchema = z.object({
   frequency:     z.enum(['once', 'daily', 'weekly', 'monthly', 'custom']),
   time:          z.string().regex(/^\d{2}:\d{2}$/),
+  timezone:      z.string().min(1).default('UTC'),
   date:          z.string().optional(),
   dayOfWeek:     z.number().int().min(0).max(6).optional(),
   dayOfMonth:    z.number().int().min(1).max(31).optional(),

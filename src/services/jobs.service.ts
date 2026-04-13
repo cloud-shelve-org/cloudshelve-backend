@@ -1,6 +1,12 @@
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import dayjsTimezone from 'dayjs/plugin/timezone';
 import { supabaseAdmin } from '../config/supabase';
 import { addDelayedJob, removeJobById } from '../config/queue';
 import type { CreateJobInput } from '../validators/jobs.validator';
+
+dayjs.extend(utc);
+dayjs.extend(dayjsTimezone);
 
 // ─── Type helpers ─────────────────────────────────────────────────────────────
 
@@ -39,67 +45,60 @@ function dbRowToJob(row: any): any {
   };
 }
 
-// ─── computeNextRunAt (mirrors the frontend helper) ───────────────────────────
+// ─── computeNextRunAt (timezone-aware via dayjs) ──────────────────────────────
 
 export function computeNextRunAt(schedule: any): Date {
-  const [hh, mm] = schedule.time.split(':').map(Number);
-  const now = new Date();
+  const tz = schedule.timezone || 'UTC';
+  const [hh, mm] = (schedule.time as string).split(':').map(Number);
 
-  const atTime = (base: Date): Date => {
-    const d = new Date(base);
-    d.setHours(hh, mm, 0, 0);
-    return d;
-  };
+  // Helper: set the scheduled HH:MM on a dayjs-in-tz instance
+  const atTime = (d: dayjs.Dayjs) =>
+    d.tz(tz).hour(hh).minute(mm).second(0).millisecond(0);
 
-  const addDays = (d: Date, n: number): Date => {
-    const r = new Date(d); r.setDate(r.getDate() + n); return r;
-  };
-
-  const addMonths = (d: Date, n: number): Date => {
-    const r = new Date(d); r.setMonth(r.getMonth() + n); return r;
-  };
-
-  let candidate: Date;
+  const nowInTz = dayjs().tz(tz);
+  let candidate: dayjs.Dayjs;
 
   switch (schedule.frequency) {
     case 'once': {
       if (!schedule.date) throw new Error("'once' schedule requires a date");
-      candidate = atTime(new Date(schedule.date));
+      candidate = dayjs.tz(
+        `${schedule.date} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`,
+        tz,
+      );
       break;
     }
     case 'daily': {
-      candidate = atTime(now);
-      if (candidate <= now) candidate = addDays(candidate, 1);
+      candidate = atTime(nowInTz);
+      if (!candidate.isAfter(nowInTz)) candidate = candidate.add(1, 'day');
       break;
     }
     case 'weekly': {
-      const dow  = schedule.dayOfWeek ?? 1;
-      const base = new Date(now);
-      candidate  = addDays(atTime(base), 1); // default: start 1 day forward
+      const dow = schedule.dayOfWeek ?? 1;
+      candidate = atTime(nowInTz.add(1, 'day')); // safe default
       for (let i = 1; i <= 7; i++) {
-        const d = addDays(atTime(base), i);
-        if (d.getDay() === dow) { candidate = d; break; }
+        const d = atTime(nowInTz.add(i, 'day'));
+        if (d.day() === dow) { candidate = d; break; }
       }
       break;
     }
     case 'monthly': {
       const dom = schedule.dayOfMonth ?? 1;
-      candidate = new Date(now.getFullYear(), now.getMonth(), dom, hh, mm, 0, 0);
-      if (candidate <= now) candidate = addMonths(candidate, 1);
+      candidate = atTime(nowInTz).date(dom);
+      if (!candidate.isAfter(nowInTz)) candidate = candidate.add(1, 'month');
       break;
     }
     case 'custom': {
       const dom      = schedule.dayOfMonth  ?? 1;
       const interval = schedule.monthInterval ?? 1;
-      candidate = new Date(now.getFullYear(), now.getMonth(), dom, hh, mm, 0, 0);
-      while (candidate <= now) candidate = addMonths(candidate, interval);
+      candidate = atTime(nowInTz).date(dom);
+      while (!candidate.isAfter(nowInTz)) candidate = candidate.add(interval, 'month');
       break;
     }
     default:
       throw new Error(`Unknown schedule frequency: ${schedule.frequency}`);
   }
 
-  return candidate;
+  return candidate.toDate();
 }
 
 // ─── Service functions ────────────────────────────────────────────────────────
