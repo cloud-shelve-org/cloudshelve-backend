@@ -9,6 +9,7 @@ import {
   renameProviderFile,
   uploadProviderFile,
   downloadProviderFile,
+  indexProviderFiles,
 } from '../services/files.service';
 
 // ─── Multer: in-memory storage, 50 MB limit ───────────────────────────────────
@@ -122,6 +123,36 @@ const downloadQuerySchema = z.object({
   name: z.string().min(1),
   path: z.string().optional().nullable(),
 });
+
+const indexQuerySchema = z.object({
+  page_token:   z.string().optional(),
+  max_per_page: z.coerce.number().int().min(1).max(2000).optional().default(1000),
+});
+
+/**
+ * GET /api/files/:providerId/index?page_token=&max_per_page=
+ *
+ * Returns a paginated page of ALL files with native hash metadata.
+ * Used exclusively by the client-side duplicate finder.
+ * File contents are NEVER fetched — metadata only.
+ */
+export async function indexFiles(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = indexQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, error: parsed.error.issues[0].message });
+      return;
+    }
+    const { page_token, max_per_page } = parsed.data;
+    const data = await indexProviderFiles(
+      req.user!.id,
+      String(req.params.providerId),
+      page_token ?? null,
+      max_per_page,
+    );
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+}
 
 /** GET /api/files/:providerId/:fileId/download?name=filename&path=... */
 export async function downloadFile(req: Request, res: Response, next: NextFunction) {

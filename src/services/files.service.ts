@@ -9,6 +9,7 @@ import {
   renameFile as adapterRenameFile,
   uploadFile as adapterUploadFile,
   downloadFile as adapterDownloadFile,
+  indexFiles as adapterIndexFiles,
 } from './files-adapters';
 
 const DB_TYPE_TO_API: Record<string, ProviderType> = {
@@ -163,4 +164,19 @@ export async function downloadProviderFile(
 ) {
   const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
   return adapterDownloadFile(providerType, accessToken, fileId, fileName, filePath);
+}
+
+/**
+ * Returns a page of ALL files (with hash metadata) for duplicate scanning.
+ * File contents never pass through this server — only lightweight metadata.
+ * max_per_page: 1–2000 (provider-dependent ceiling applied inside the adapter).
+ */
+export async function indexProviderFiles(
+  userId: string,
+  providerId: string,
+  pageToken: string | null,
+  maxPerPage: number,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterIndexFiles(providerType, accessToken, pageToken, maxPerPage);
 }

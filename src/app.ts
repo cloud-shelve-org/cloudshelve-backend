@@ -9,6 +9,7 @@ import providersRoutes     from './routes/providers.routes';
 import filesRoutes         from './routes/files.routes';
 import jobsRoutes          from './routes/jobs.routes';
 import subscriptionsRoutes from './routes/subscriptions.routes';
+import scansRoutes         from './routes/scans.routes';
 import { errorMiddleware } from './middleware/error.middleware';
 
 const app = express();
@@ -32,6 +33,7 @@ app.use('/api/providers',     providersRoutes);
 app.use('/api/files',         filesRoutes);
 app.use('/api/jobs',          jobsRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
+app.use('/api/scans',         scansRoutes);
 
 app.use(errorMiddleware);
 

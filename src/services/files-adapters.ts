@@ -1015,3 +1015,294 @@ async function downloadMegaFile(
     };
   });
 }
+
+// ─── File index (duplicate-finder metadata harvest) ───────────────────────────
+//
+// Each provider returns all files with whatever native hash it exposes.
+// No file content ever leaves the provider — only metadata.
+// The mobile client performs the actual duplicate comparison in memory.
+
+export type IndexHashAlgo =
+  | 'md5'                // Google Drive
+  | 'sha1'               // Box (hex)
+  | 'sha1_base64'        // OneDrive SHA1 (base64-encoded; client normalises to hex)
+  | 'dropboxContentHash' // Dropbox proprietary multi-block SHA-256
+  | 'quickXorHash';      // OneDrive proprietary (usable only within same-provider)
+
+export interface FileIndexEntry {
+  id:             string;
+  name:           string;
+  path:           string;   // full provider path when available; filename otherwise
+  size:           number;   // bytes
+  mimeType:       string;
+  nativeHash?:    string;
+  nativeHashAlgo?:IndexHashAlgo;
+  modifiedAt:     string;   // ISO-8601
+}
+
+export interface IndexFilesResult {
+  files:         FileIndexEntry[];
+  nextPageToken: string | null;
+  totalFetched:  number;
+}
+
+/** Dispatcher — returns a page of all files (recursively) with hash metadata. */
+export async function indexFiles(
+  providerType: ProviderType,
+  accessToken: string,
+  pageToken: string | null,
+  maxPerPage: number,
+): Promise<IndexFilesResult> {
+  switch (providerType) {
+    case 'google_drive': return indexGoogleDriveFiles(accessToken, pageToken, maxPerPage);
+    case 'onedrive':     return indexOneDriveFiles(accessToken, pageToken, maxPerPage);
+    case 'dropbox':      return indexDropboxFiles(accessToken, pageToken, maxPerPage);
+    case 'box':          return indexBoxFiles(accessToken, pageToken, maxPerPage);
+    case 'mega':         return indexMegaFiles(accessToken, pageToken, maxPerPage);
+    default: throw new Error(`File indexing not supported for ${providerType}`);
+  }
+}
+
+// ── Google Drive ──────────────────────────────────────────────────────────────
+// Lists ALL non-trashed, non-folder files in one shot (no parent filter).
+// md5Checksum is returned for user-uploaded files; Google Workspace files
+// (Docs, Sheets, Slides) have no size/hash and are filtered out.
+
+async function indexGoogleDriveFiles(
+  accessToken: string,
+  pageToken: string | null,
+  maxPerPage: number,
+): Promise<IndexFilesResult> {
+  const params = new URLSearchParams({
+    fields: 'nextPageToken,files(id,name,mimeType,size,md5Checksum,modifiedTime)',
+    q: "trashed=false and mimeType!='application/vnd.google-apps.folder'",
+    pageSize: String(Math.min(maxPerPage, 1000)),
+    spaces: 'drive',
+  });
+  if (pageToken) params.set('pageToken', pageToken);
+
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error(`Google Drive index error ${res.status}`);
+  const data = await res.json();
+
+  const files: FileIndexEntry[] = (data.files ?? [])
+    .filter((f: any) => f.size && !f.mimeType?.startsWith('application/vnd.google-apps'))
+    .map((f: any) => ({
+      id:             f.id,
+      name:           f.name,
+      path:           f.name,   // full-path reconstruction needs extra calls; filename is enough for MVP
+      size:           parseInt(f.size, 10),
+      mimeType:       f.mimeType ?? 'application/octet-stream',
+      nativeHash:     f.md5Checksum,
+      nativeHashAlgo: f.md5Checksum ? 'md5' as const : undefined,
+      modifiedAt:     f.modifiedTime,
+    }));
+
+  return { files, nextPageToken: data.nextPageToken ?? null, totalFetched: files.length };
+}
+
+// ── OneDrive ──────────────────────────────────────────────────────────────────
+// Uses the /delta endpoint which efficiently streams the full file tree.
+// The nextPageToken IS the @odata.nextLink URL (full URL, safe to pass opaquely).
+
+async function indexOneDriveFiles(
+  accessToken: string,
+  pageToken: string | null,
+  maxPerPage: number,
+): Promise<IndexFilesResult> {
+  const url = pageToken
+    ?? `https://graph.microsoft.com/v1.0/me/drive/root/delta?$select=id,name,file,size,lastModifiedDateTime,parentReference&$top=${Math.min(maxPerPage, 1000)}`;
+
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) throw new Error(`OneDrive index error ${res.status}`);
+  const data = await res.json();
+
+  const files: FileIndexEntry[] = (data.value ?? [])
+    .filter((item: any) => item.file && !item.deleted)
+    .map((item: any) => {
+      const parentPath: string = item.parentReference?.path?.replace('/drive/root:', '') ?? '';
+      const hash = item.file?.hashes?.sha1Hash;
+      return {
+        id:             item.id,
+        name:           item.name,
+        path:           parentPath ? `${parentPath}/${item.name}` : `/${item.name}`,
+        size:           item.size ?? 0,
+        mimeType:       item.file?.mimeType ?? 'application/octet-stream',
+        nativeHash:     hash,
+        nativeHashAlgo: hash ? 'sha1_base64' as const : undefined,
+        modifiedAt:     item.lastModifiedDateTime,
+      };
+    });
+
+  // nextLink = more pages; deltaLink = fully caught up (done for now)
+  const nextLink: string | undefined = data['@odata.nextLink'];
+  return { files, nextPageToken: nextLink ?? null, totalFetched: files.length };
+}
+
+// ── Dropbox ───────────────────────────────────────────────────────────────────
+// list_folder with recursive:true returns the full tree in one cursor stream.
+// The cursor IS the pageToken — pass it to list_folder/continue on subsequent calls.
+
+async function indexDropboxFiles(
+  accessToken: string,
+  pageToken: string | null,
+  maxPerPage: number,
+): Promise<IndexFilesResult> {
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+  };
+
+  let data: any;
+  if (pageToken) {
+    const res = await fetch('https://api.dropboxapi.com/2/files/list_folder/continue', {
+      method: 'POST', headers,
+      body: JSON.stringify({ cursor: pageToken }),
+    });
+    if (!res.ok) throw new Error(`Dropbox index continue error ${res.status}`);
+    data = await res.json();
+  } else {
+    const res = await fetch('https://api.dropboxapi.com/2/files/list_folder', {
+      method: 'POST', headers,
+      body: JSON.stringify({
+        path: '', recursive: true,
+        include_media_info: false, include_deleted: false,
+        limit: Math.min(maxPerPage, 2000),
+      }),
+    });
+    if (!res.ok) throw new Error(`Dropbox index error ${res.status}`);
+    data = await res.json();
+  }
+
+  const files: FileIndexEntry[] = (data.entries ?? [])
+    .filter((e: any) => e['.tag'] === 'file')
+    .map((e: any) => ({
+      id:             e.id,
+      name:           e.name,
+      path:           e.path_display ?? e.name,
+      size:           e.size,
+      mimeType:       'application/octet-stream',
+      nativeHash:     e.content_hash,
+      nativeHashAlgo: e.content_hash ? 'dropboxContentHash' as const : undefined,
+      modifiedAt:     e.client_modified,
+    }));
+
+  const nextPageToken = data.has_more ? (data.cursor ?? null) : null;
+  return { files, nextPageToken, totalFetched: files.length };
+}
+
+// ── Box ───────────────────────────────────────────────────────────────────────
+// BFS folder traversal encoded in the cursor as base64 JSON.
+// cursor shape: { queue: string[], current: string, offset: number }
+
+interface BoxCursor { queue: string[]; current: string; offset: number }
+
+async function indexBoxFiles(
+  accessToken: string,
+  pageToken: string | null,
+  maxPerPage: number,
+): Promise<IndexFilesResult> {
+  const PAGE = Math.min(maxPerPage, 200);
+  const headers = { Authorization: `Bearer ${accessToken}` };
+
+  let cursor: BoxCursor;
+  try {
+    cursor = pageToken
+      ? JSON.parse(Buffer.from(pageToken, 'base64url').toString())
+      : { queue: [], current: '0', offset: 0 };
+  } catch {
+    cursor = { queue: [], current: '0', offset: 0 };
+  }
+
+  const files: FileIndexEntry[] = [];
+  let bail = false;
+
+  while (!bail && files.length < maxPerPage) {
+    const res = await fetch(
+      `https://api.box.com/2.0/folders/${cursor.current}/items` +
+      `?fields=id,name,sha1,size,modified_at,type&limit=${PAGE}&offset=${cursor.offset}`,
+      { headers },
+    );
+    if (!res.ok) break;
+    const data = await res.json();
+    const entries: any[] = data.entries ?? [];
+
+    for (const e of entries) {
+      if (e.type === 'file') {
+        files.push({
+          id:             e.id,
+          name:           e.name,
+          path:           `/${e.name}`,
+          size:           e.size ?? 0,
+          mimeType:       'application/octet-stream',
+          nativeHash:     e.sha1,
+          nativeHashAlgo: e.sha1 ? 'sha1' as const : undefined,
+          modifiedAt:     e.modified_at,
+        });
+      } else if (e.type === 'folder') {
+        cursor.queue.push(e.id);
+      }
+    }
+
+    const fetched = entries.length;
+    const total: number = data.total_count ?? 0;
+    cursor.offset += fetched;
+
+    if (cursor.offset >= total) {
+      if (cursor.queue.length === 0) { bail = true; break; }
+      cursor.current = cursor.queue.shift()!;
+      cursor.offset  = 0;
+    }
+  }
+
+  const hasMore = !bail;
+  const nextPageToken = hasMore ? Buffer.from(JSON.stringify(cursor)).toString('base64url') : null;
+  return { files, nextPageToken, totalFetched: files.length };
+}
+
+// ── MEGA ──────────────────────────────────────────────────────────────────────
+// MEGA does not expose file hashes via the API.  We return size + path only;
+// the client uses size + filename for same-MEGA duplicate detection (confidence: high).
+
+async function indexMegaFiles(
+  credentialsJson: string,
+  pageToken: string | null,
+  maxPerPage: number,
+): Promise<IndexFilesResult> {
+  return withMegaStorage(credentialsJson, async (storage: any) => {
+    const allFiles: FileIndexEntry[] = [];
+
+    function traverse(node: any, parentPath: string) {
+      for (const child of Object.values(node.children ?? {}) as any[]) {
+        const childPath = `${parentPath}/${child.name}`;
+        if (child.directory) {
+          traverse(child, childPath);
+        } else if (child.size > 0) {
+          allFiles.push({
+            id:        child.nodeId ?? child.name,
+            name:      child.name,
+            path:      childPath,
+            size:      child.size,
+            mimeType:  'application/octet-stream',
+            modifiedAt: child.timestamp
+              ? new Date(child.timestamp * 1000).toISOString()
+              : new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    traverse(storage.root, '');
+
+    const offset = pageToken ? parseInt(pageToken, 10) : 0;
+    const page   = allFiles.slice(offset, offset + maxPerPage);
+    const next   = offset + maxPerPage;
+    return {
+      files:         page,
+      nextPageToken: next < allFiles.length ? String(next) : null,
+      totalFetched:  page.length,
+    };
+  });
+}

@@ -9,6 +9,7 @@ import {
   uploadFile,
   uploadMiddleware,
   downloadFile,
+  indexFiles,
 } from '../controllers/files.controller';
 
 const router = Router();
@@ -16,6 +17,7 @@ const router = Router();
 // All file routes require authentication
 router.get( '/:providerId',                        authMiddleware, listFiles);
 router.get( '/:providerId/search',                 authMiddleware, searchFiles);
+router.get( '/:providerId/index',                  authMiddleware, indexFiles);
 router.post('/:providerId/folder',                 authMiddleware, createFolder);
 router.post('/:providerId/upload',                 authMiddleware, uploadMiddleware, uploadFile);
 router.get( '/:providerId/:fileId/download',       authMiddleware, downloadFile);
