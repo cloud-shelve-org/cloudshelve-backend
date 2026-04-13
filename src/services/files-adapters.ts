@@ -1085,7 +1085,7 @@ async function indexGoogleDriveFiles(
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) throw new Error(`Google Drive index error ${res.status}`);
-  const data = await res.json();
+  const data: any = await res.json();
 
   const files: FileIndexEntry[] = (data.files ?? [])
     .filter((f: any) => f.size && !f.mimeType?.startsWith('application/vnd.google-apps'))
@@ -1117,7 +1117,7 @@ async function indexOneDriveFiles(
 
   const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) throw new Error(`OneDrive index error ${res.status}`);
-  const data = await res.json();
+  const data: any = await res.json();
 
   const files: FileIndexEntry[] = (data.value ?? [])
     .filter((item: any) => item.file && !item.deleted)
@@ -1226,7 +1226,7 @@ async function indexBoxFiles(
       { headers },
     );
     if (!res.ok) break;
-    const data = await res.json();
+    const data: any = await res.json();
     const entries: any[] = data.entries ?? [];
 
     for (const e of entries) {
