@@ -307,9 +307,9 @@ async function downloadGoogleDriveFile(accessToken: string, fileId: string, file
     { headers },
   );
   if (!metaResp.ok) throw new Error(`Google Drive metadata fetch failed: ${metaResp.status}`);
-  const meta = await metaResp.json();
+  const meta = await metaResp.json() as { mimeType?: string; name?: string };
 
-  const exportInfo = GDRIVE_EXPORT_MIME[meta.mimeType as string];
+  const exportInfo = GDRIVE_EXPORT_MIME[meta.mimeType ?? ''];
   const exportMime = exportInfo?.mime ?? 'application/pdf';
   const exportExt  = exportInfo?.ext  ?? '.pdf';
 
