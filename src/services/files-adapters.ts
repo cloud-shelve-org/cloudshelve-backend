@@ -275,13 +275,31 @@ async function uploadGoogleDriveFile(
   return mapGoogleDriveItem(await resp.json());
 }
 
-// Google Workspace mimeType → export mimeType + file extension
-const GDRIVE_EXPORT_MIME: Record<string, { mime: string; ext: string }> = {
+// Google Workspace mimeType → export mimeType + extension.
+// null = file type has no export support and must be skipped by the worker.
+const GDRIVE_EXPORT_MIME: Record<string, { mime: string; ext: string } | null> = {
+  // Exportable Workspace types
   'application/vnd.google-apps.document':     { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  ext: '.docx' },
   'application/vnd.google-apps.spreadsheet':  { mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',        ext: '.xlsx' },
   'application/vnd.google-apps.presentation': { mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', ext: '.pptx' },
   'application/vnd.google-apps.drawing':      { mime: 'image/png',                                                                ext: '.png'  },
+  'application/vnd.google-apps.script':       { mime: 'application/vnd.google-apps.script+json',                                 ext: '.json' },
+  // Non-exportable Workspace types — no download format exists
+  'application/vnd.google-apps.form':         null,
+  'application/vnd.google-apps.map':          null,
+  'application/vnd.google-apps.site':         null,
+  'application/vnd.google-apps.fusiontable':  null,
+  'application/vnd.google-apps.jam':          null,
+  'application/vnd.google-apps.shortcut':     null,
 };
+
+/** Thrown when a Workspace file has no exportable format — the worker should skip it. */
+export class GDriveNotExportableError extends Error {
+  readonly code = 'GDRIVE_NOT_EXPORTABLE' as const;
+  constructor(fileName: string, mimeType: string) {
+    super(`"${fileName}" (${mimeType}) cannot be exported from Google Drive and was skipped.`);
+  }
+}
 
 async function downloadGoogleDriveFile(accessToken: string, fileId: string, fileName: string): Promise<DownloadResult> {
   const headers = { Authorization: `Bearer ${accessToken}` };
@@ -295,7 +313,7 @@ async function downloadGoogleDriveFile(accessToken: string, fileId: string, file
     return { buffer, contentType, fileName };
   }
 
-  // Google Workspace files (Docs/Sheets/Slides/Drawings) return 403 fileNotDownloadable
+  // Google Workspace files return 403 fileNotDownloadable — must use the export endpoint
   const body = await resp.text();
   if (!(resp.status === 403 && body.includes('fileNotDownloadable'))) {
     throw new Error(`Google Drive download failed: ${resp.status} ${body}`);
@@ -308,19 +326,32 @@ async function downloadGoogleDriveFile(accessToken: string, fileId: string, file
   );
   if (!metaResp.ok) throw new Error(`Google Drive metadata fetch failed: ${metaResp.status}`);
   const meta = await metaResp.json() as { mimeType?: string; name?: string };
+  const mimeType = meta.mimeType ?? '';
 
-  const exportInfo = GDRIVE_EXPORT_MIME[meta.mimeType ?? ''];
-  const exportMime = exportInfo?.mime ?? 'application/pdf';
-  const exportExt  = exportInfo?.ext  ?? '.pdf';
+  // undefined = unknown Workspace type (try PDF); null = known non-exportable
+  const exportEntry = Object.prototype.hasOwnProperty.call(GDRIVE_EXPORT_MIME, mimeType)
+    ? GDRIVE_EXPORT_MIME[mimeType]
+    : undefined;
+
+  if (exportEntry === null) {
+    throw new GDriveNotExportableError(fileName, mimeType);
+  }
+
+  const exportMime = exportEntry?.mime ?? 'application/pdf';
+  const exportExt  = exportEntry?.ext  ?? '.pdf';
 
   const exportResp = await fetch(
     `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`,
     { headers },
   );
-  if (!exportResp.ok) throw new Error(`Google Drive export failed: ${exportResp.status} ${await exportResp.text()}`);
+  if (!exportResp.ok) {
+    // 400 means this specific file/type can't be converted — skip rather than abort
+    if (exportResp.status === 400) throw new GDriveNotExportableError(fileName, mimeType);
+    throw new Error(`Google Drive export failed: ${exportResp.status} ${await exportResp.text()}`);
+  }
 
-  const buffer        = Buffer.from(await exportResp.arrayBuffer());
-  const baseName      = fileName.replace(/\.[^.]+$/, '') || fileName;
+  const buffer         = Buffer.from(await exportResp.arrayBuffer());
+  const baseName       = fileName.replace(/\.[^.]+$/, '') || fileName;
   const exportFileName = `${baseName}${exportExt}`;
   return { buffer, contentType: exportMime, fileName: exportFileName };
 }

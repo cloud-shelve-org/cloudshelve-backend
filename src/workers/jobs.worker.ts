@@ -9,6 +9,7 @@ import {
   uploadProviderFile,
   deleteProviderFile,
 } from '../services/files.service';
+import { GDriveNotExportableError } from '../services/files-adapters';
 import type { FileItem } from '../services/files-adapters';
 
 // ─── Error humanisation ───────────────────────────────────────────────────────
@@ -141,6 +142,7 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
     });
 
     const t0 = Date.now();
+    let skipped = 0;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -151,40 +153,49 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
       const eta     = rate ? Math.round((total - i) / rate) : null;
 
       await patchTask(taskId, (i / Math.max(total, 1)) * 100, {
-        files_processed:             i,
+        files_processed:             i - skipped,
         current_file:                file.name,
         estimated_seconds_remaining: eta,
       });
 
-      switch (type) {
-        case 'cleanup': {
-          await deleteProviderFile(userId, source.providerId, file.id, file.path);
-          break;
-        }
-
-        case 'copy':
-        case 'move':
-        case 'sync': {
-          const { buffer, contentType } = await downloadProviderFile(
-            userId,
-            source.providerId,
-            file.id,
-            file.name,
-            file.path,
-          );
-          await uploadProviderFile(
-            userId,
-            destination.providerId,
-            destination.folderId ?? null,
-            file.name,
-            contentType || file.mimeType || 'application/octet-stream',
-            buffer,
-          );
-          if (type === 'move') {
+      try {
+        switch (type) {
+          case 'cleanup': {
             await deleteProviderFile(userId, source.providerId, file.id, file.path);
+            break;
           }
-          break;
+
+          case 'copy':
+          case 'move':
+          case 'sync': {
+            const { buffer, contentType, fileName: exportedName } = await downloadProviderFile(
+              userId,
+              source.providerId,
+              file.id,
+              file.name,
+              file.path,
+            );
+            await uploadProviderFile(
+              userId,
+              destination.providerId,
+              destination.folderId ?? null,
+              exportedName,
+              contentType || file.mimeType || 'application/octet-stream',
+              buffer,
+            );
+            if (type === 'move') {
+              await deleteProviderFile(userId, source.providerId, file.id, file.path);
+            }
+            break;
+          }
         }
+      } catch (fileErr: any) {
+        if (fileErr instanceof GDriveNotExportableError || fileErr?.code === 'GDRIVE_NOT_EXPORTABLE') {
+          console.warn(`[jobs-worker] Task ${taskId}: skipping non-exportable file "${file.name}"`);
+          skipped++;
+          continue;
+        }
+        throw fileErr; // Fatal — propagate to outer catch
       }
     }
 
