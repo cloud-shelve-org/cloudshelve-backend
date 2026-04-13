@@ -3,6 +3,7 @@ import utc from 'dayjs/plugin/utc';
 import dayjsTimezone from 'dayjs/plugin/timezone';
 import { supabaseAdmin } from '../config/supabase';
 import { addDelayedJob, removeJobById } from '../config/queue';
+import { checkActiveJobLimit } from './subscriptions.service';
 import type { CreateJobInput } from '../validators/jobs.validator';
 
 dayjs.extend(utc);
@@ -122,6 +123,8 @@ export async function listJobs(userId: string): Promise<any[]> {
 }
 
 export async function createJob(userId: string, input: CreateJobInput): Promise<any> {
+  await checkActiveJobLimit(userId);
+
   const nextRunAt = computeNextRunAt(input.schedule);
   const dbType    = frontendTypeToDB(input.type);
 

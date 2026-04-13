@@ -1,8 +1,11 @@
 import { Worker, Job as BullJob } from 'bullmq';
+import pLimit from 'p-limit';
 import { createRedisConnection } from '../config/redis';
 import { QUEUE_NAME, addDelayedJob } from '../config/queue';
 import { supabaseAdmin } from '../config/supabase';
+import { PLAN_LIMITS } from '../config/plans';
 import { computeNextRunAt } from '../services/jobs.service';
+import { getUserPlan, checkTransferLimit, recordTransferUsage } from '../services/subscriptions.service';
 import {
   listProviderFiles,
   downloadProviderFile,
@@ -156,6 +159,13 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
   const startedAt = new Date().toISOString();
 
   try {
+    // Block if the user has already exhausted their monthly transfer allowance
+    await checkTransferLimit(userId);
+
+    // Resolve thread count from the user's plan
+    const plan    = await getUserPlan(userId);
+    const threads = PLAN_LIMITS[plan].threads;
+
     const files = await collectFiles(userId, source.providerId, source.folderId ?? null);
     const total = files.length;
 
@@ -167,34 +177,30 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
       estimated_seconds_remaining: null,
     });
 
+    console.log(`[jobs-worker] Task ${taskId}: processing ${total} files with ${threads} thread(s) (plan: ${plan})`);
+
     const t0 = Date.now();
-    let skipped = 0;
+
+    // Mutable counters — safe in single-threaded Node.js
+    let completed        = 0;
+    let skipped          = 0;
+    let bytesTransferred = 0;
     const skippedByReason: Record<GDriveSkipReason, string[]> = {
       download_restricted: [],
       not_exportable:      [],
     };
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    // Throttle DB progress writes to avoid hammering Supabase
+    let lastPatchAt = 0;
+    const PATCH_INTERVAL_MS = 2000;
 
-      // Rolling ETA
-      const elapsed = (Date.now() - t0) / 1000;
-      const rate    = i > 0 ? i / elapsed : null;
-      const eta     = rate ? Math.round((total - i) / rate) : null;
-
-      await patchTask(taskId, (i / Math.max(total, 1)) * 100, {
-        files_processed:             i - skipped,
-        current_file:                file.name,
-        estimated_seconds_remaining: eta,
-      });
-
+    async function processFile(file: FileItem): Promise<void> {
       try {
         switch (type) {
           case 'cleanup': {
             await deleteProviderFile(userId, source.providerId, file.id, file.path);
             break;
           }
-
           case 'copy':
           case 'move':
           case 'sync': {
@@ -205,6 +211,7 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
               file.name,
               file.path,
             );
+            bytesTransferred += buffer.byteLength;
             await uploadProviderFile(
               userId,
               destination.providerId,
@@ -219,17 +226,37 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
             break;
           }
         }
+        completed++;
       } catch (fileErr: any) {
         if (fileErr instanceof GDriveNotExportableError || fileErr?.code === 'GDRIVE_NOT_EXPORTABLE') {
           const reason: GDriveSkipReason = fileErr.reason ?? 'not_exportable';
           console.warn(`[jobs-worker] Task ${taskId}: skipping "${file.name}" (${reason})`);
           skippedByReason[reason].push(file.name);
           skipped++;
-          continue;
+          return; // non-fatal
         }
-        throw fileErr; // Fatal — propagate to outer catch
+        throw fileErr; // fatal — propagates out of Promise.all
+      }
+
+      // Throttled progress update (check+set is synchronous → no race in Node.js)
+      const now = Date.now();
+      if (now - lastPatchAt >= PATCH_INTERVAL_MS) {
+        lastPatchAt = now;
+        const done    = completed + skipped;
+        const elapsed = (now - t0) / 1000;
+        const rate    = done > 0 ? done / elapsed : null;
+        const eta     = rate ? Math.round((total - done) / rate) : null;
+        await patchTask(taskId, (done / Math.max(total, 1)) * 100, {
+          files_processed:             completed,
+          current_file:                file.name,
+          estimated_seconds_remaining: eta,
+        });
       }
     }
+
+    // Run files concurrently up to `threads` at a time
+    const limit = pLimit(threads);
+    await Promise.all(files.map((file) => limit(() => processFile(file))));
 
     const completedAt = new Date().toISOString();
     const isOnce      = !cfg.schedule || cfg.schedule.frequency === 'once' || cfg.schedule.frequency === 'immediate';
@@ -237,9 +264,17 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
     // Build a human-readable warning if any files were skipped
     const warning = buildSkipWarning(skippedByReason);
 
+    // Record transfer usage atomically (fire-and-forget errors — non-critical)
+    if (bytesTransferred > 0) {
+      await recordTransferUsage(userId, bytesTransferred).catch((e) =>
+        console.error(`[jobs-worker] Failed to record transfer usage for task ${taskId}:`, e),
+      );
+    }
+
     const completionConfigPatch = {
-      files_processed:             total - skipped,
+      files_processed:             completed,
       skipped_files:               skipped,
+      bytes_transferred:           bytesTransferred,
       warning,
       current_file:                null,
       estimated_seconds_remaining: null,

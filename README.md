@@ -329,6 +329,24 @@ All routes require an `Authorization: Bearer <supabase_access_token>` header.
 }
 ```
 
+## Plan Limits
+
+Plan limits are enforced at two layers — the API (before insert) and the BullMQ worker (thread count).
+
+| Plan | Providers | Active Jobs | Transfer / month | Worker threads |
+|---|---|---|---|---|
+| **Free** | 3 | 1 | 5 GB | 1 |
+| **Pro** ₹199/mo | 10 | 10 | 100 GB | 4 |
+| **Business** ₹499/mo | 20 | unlimited | 1 TB | 8 |
+
+- **Provider limit** — checked in `providers.service.connectProvider()` before any token exchange
+- **Active job limit** — checked in `jobs.service.createJob()` before DB insert; counts `status=running` + `status=pending && config.is_active=true` rows
+- **Worker threads** — resolved at runtime via `getUserPlan(userId)` → `PLAN_LIMITS[plan].threads` → passed to `pLimit(threads)` for per-file concurrency
+
+Limits config lives in `src/config/plans.ts` and mirrors the `subscriptions` table columns (`providers_limit`, `active_jobs_limit`, `transfer_bytes_limit`, `parallel_threads`).
+
+---
+
 ## Job System (BullMQ + Redis)
 
 ### Architecture
@@ -336,23 +354,48 @@ All routes require an `Authorization: Bearer <supabase_access_token>` header.
 ```
 POST /api/jobs
   └─ jobs.service.createJob()
+       ├─ checkActiveJobLimit(userId)    ← enforces plan job cap
        ├─ INSERT tasks row (status=pending, config.is_active=true, config.next_run_at=…)
        └─ jobQueue.add('run-task', { taskId, userId }, { delay: msUntilNextRun })
                                                               ↓
-jobs.worker.ts  (BullMQ Worker, concurrency=4)
+jobs.worker.ts  (BullMQ Worker, concurrency=4 tasks in parallel)
   └─ runTask({ taskId, userId })
        ├─ Re-read task from DB — skip if config.is_active=false (toggle-off race guard)
        ├─ UPDATE status=running
+       ├─ getUserPlan(userId) → PLAN_LIMITS[plan].threads → pLimit(threads)
        ├─ collectFiles() — walks all pages in source folder
-       ├─ Per-file loop with rolling ETA in DB:
+       ├─ Promise.all(files.map(limit(processFile))) — parallel with throttled DB progress
        │    copy / sync  → downloadProviderFile → uploadProviderFile
        │    move         → download → upload → deleteProviderFile
        │    delete       → deleteProviderFile
+       │    skip (GDrive non-exportable / download-restricted) → warning accumulated
        └─ On success:
-            frequency=once     → UPDATE status=completed, progress=100
-            frequency=recurring → computeNextRunAt → UPDATE status=pending, progress=0
-                                → jobQueue.add(delay) for next run
+            frequency=once/immediate → UPDATE status=completed, progress=100
+            frequency=recurring      → computeNextRunAt → UPDATE status=pending, progress=0
+                                     → jobQueue.add(delay) for next run
 ```
+
+### File-level parallelism (Option A — current)
+
+Files within a single task are processed concurrently using [`p-limit`](https://github.com/sindresorhus/p-limit). The concurrency cap is read from the user's plan at task start time, so upgrading a plan takes effect on the next job run.
+
+#### TODO — Future parallelism improvements
+
+**Option B — Fan-out to sub-jobs (chunk splitting)**
+
+Split the file list into N equal chunks and enqueue each chunk as a separate BullMQ job. A parent coordinator job waits for all chunks to complete (BullMQ Flow / job dependencies) before marking the task as done.
+
+- Pros: true fault isolation per chunk (chunk 2 fails → chunks 1/3/4 still complete), natural horizontal scaling across multiple worker replicas, better retry granularity.
+- Cons: ~5× more implementation complexity; requires BullMQ Flows; progress aggregation and warning merging must happen in a completion hook.
+- When to consider: folders with consistently 1 000+ files where partial failures are common.
+
+**Option C — Serverless function fan-out**
+
+Dispatch each chunk to a separate HTTP-triggered function (Railway Functions / AWS Lambda). The worker acts as an orchestrator and polls function results.
+
+- Pros: effectively unlimited parallelism, no worker memory ceiling.
+- Cons: HTTP overhead per chunk, cold-start latency, complex result collection, harder to enforce per-user rate limits, significant infra cost at scale.
+- When to consider: if Option B throughput is still insufficient at Business tier and workloads are bursty.
 
 ### Schedule frequencies
 

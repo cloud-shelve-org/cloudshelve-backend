@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../config/supabase';
 import { encryptCredentials, decryptCredentials } from '../lib/credentials-crypto';
+import { checkProviderLimit } from './subscriptions.service';
 import {
   getAuthorizationUrl,
   exchangeCode,
@@ -215,6 +216,9 @@ export async function connectProvider(
     err.statusCode = 400;
     throw err;
   }
+
+  // Enforce plan provider limit before doing any token exchange
+  await checkProviderLimit(userId);
 
   let email: string;
   let displayName: string;
