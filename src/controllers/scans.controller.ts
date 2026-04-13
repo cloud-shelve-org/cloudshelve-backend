@@ -6,6 +6,7 @@ import {
   consumeScanCredit,
   recordScanHistory,
   getScanHistory,
+  deleteScanHistoryRecord,
   expireStaleCredits,
   checkScanQuota,
   getScanQuota,
@@ -143,6 +144,21 @@ export async function listHistory(req: Request, res: Response, next: NextFunctio
     const limit = parsed.success ? parsed.data.limit : 10;
     const data = await getScanHistory(req.user!.id, limit);
     res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * DELETE /api/scans/history/:id
+ * Deletes a scan history record owned by the authenticated user.
+ */
+export async function deleteHistory(req: Request, res: Response, next: NextFunction) {
+  try {
+    const id = String(req.params.id);
+    if (!id) { res.status(400).json({ success: false, error: 'Missing id' }); return; }
+    await deleteScanHistoryRecord(req.user!.id, id);
+    res.json({ success: true });
   } catch (err) {
     next(err);
   }

@@ -3,7 +3,7 @@ import { authMiddleware } from '../middleware/auth.middleware';
 import { authRateLimit } from '../middleware/rate-limit.middleware';
 import {
   purchaseCredit, listCredits, useCredit,
-  createHistory, listHistory, getQuota,
+  createHistory, listHistory, deleteHistory, getQuota,
 } from '../controllers/scans.controller';
 
 const router = Router();
@@ -15,7 +15,8 @@ router.get( '/quota',            getQuota);
 router.get( '/credits',          listCredits);
 router.post('/credits/purchase', purchaseCredit);
 router.post('/credits/consume',  useCredit);
-router.post('/history',          createHistory);
-router.get( '/history',          listHistory);
+router.post(  '/history',        createHistory);
+router.get(   '/history',        listHistory);
+router.delete('/history/:id',    deleteHistory);
 
 export default router;

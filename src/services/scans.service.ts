@@ -128,6 +128,15 @@ export async function recordScanHistory(
 
 // ─── Scan history for the user ────────────────────────────────────────────────
 
+export async function deleteScanHistoryRecord(userId: string, id: string) {
+  const { error } = await supabaseAdmin
+    .from('scan_history')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', userId); // scoped to owner — prevents deleting other users' records
+  if (error) throw error;
+}
+
 export async function getScanHistory(userId: string, limit = 10) {
   const { data, error } = await supabaseAdmin
     .from('scan_history')
