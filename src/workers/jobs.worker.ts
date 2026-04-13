@@ -11,6 +11,51 @@ import {
 } from '../services/files.service';
 import type { FileItem } from '../services/files-adapters';
 
+// ─── Error humanisation ───────────────────────────────────────────────────────
+
+function friendlyError(err: any): string {
+  const msg: string = err?.message ?? '';
+
+  if (msg.includes('Google Drive')) {
+    if (msg.includes('401')) return 'Google Drive: Session expired. Reconnect your Google Drive account and try again.';
+    if (msg.includes('403')) return 'Google Drive: Access denied. Make sure the app still has permission to access this folder.';
+    if (msg.includes('404')) return 'Google Drive: File or folder not found. It may have been moved or deleted.';
+    if (msg.includes('export failed')) return 'Google Drive: Could not export this file type. Only Docs, Sheets, Slides, and Drawings are exportable.';
+    return 'Google Drive: An error occurred while processing files.';
+  }
+
+  if (msg.includes('OneDrive')) {
+    if (msg.includes('401')) return 'OneDrive: Session expired. Reconnect your OneDrive account and try again.';
+    if (msg.includes('403')) return 'OneDrive: Access denied. Check your OneDrive permissions.';
+    if (msg.includes('404')) return 'OneDrive: File or folder not found. It may have been moved or deleted.';
+    return 'OneDrive: An error occurred while processing files.';
+  }
+
+  if (msg.includes('Dropbox')) {
+    if (msg.includes('401')) return 'Dropbox: Session expired. Reconnect your Dropbox account and try again.';
+    if (msg.includes('403')) return 'Dropbox: Access denied. Check your Dropbox permissions.';
+    return 'Dropbox: An error occurred while processing files.';
+  }
+
+  if (msg.includes('Box')) {
+    if (msg.includes('401')) return 'Box: Session expired. Reconnect your Box account and try again.';
+    if (msg.includes('403')) return 'Box: Access denied. Check your Box permissions.';
+    return 'Box: An error occurred while processing files.';
+  }
+
+  const lower = msg.toLowerCase();
+  if (lower.includes('quota') || lower.includes('storage full') || lower.includes('insufficient storage')) {
+    return 'Not enough storage space in the destination. Free up space and try again.';
+  }
+  if (lower.includes('fetch failed') || lower.includes('network') || lower.includes('econnrefused') || lower.includes('enotfound')) {
+    return 'Network error. Check your internet connection and try again.';
+  }
+
+  // Return raw message only if it looks user-safe (no HTTP codes / stack info)
+  if (msg && !msg.match(/^\s*Error:/i) && msg.length < 200) return msg;
+  return 'An unexpected error occurred. Please try again or contact support.';
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Collect every non-folder item in a provider folder (walks all pages). */
@@ -183,9 +228,10 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
       .from('tasks')
       .update({
         status:        'failed',
-        error_message: err?.message ?? 'Unknown error',
+        error_message: friendlyError(err),
         completed_at:  new Date().toISOString(),
         bull_job_id:   null,
+        config:        { ...cfg, is_active: false },
       })
       .eq('id', taskId);
   }

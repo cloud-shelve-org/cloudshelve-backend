@@ -275,14 +275,54 @@ async function uploadGoogleDriveFile(
   return mapGoogleDriveItem(await resp.json());
 }
 
+// Google Workspace mimeType → export mimeType + file extension
+const GDRIVE_EXPORT_MIME: Record<string, { mime: string; ext: string }> = {
+  'application/vnd.google-apps.document':     { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  ext: '.docx' },
+  'application/vnd.google-apps.spreadsheet':  { mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',        ext: '.xlsx' },
+  'application/vnd.google-apps.presentation': { mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', ext: '.pptx' },
+  'application/vnd.google-apps.drawing':      { mime: 'image/png',                                                                ext: '.png'  },
+};
+
 async function downloadGoogleDriveFile(accessToken: string, fileId: string, fileName: string): Promise<DownloadResult> {
-  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!resp.ok) throw new Error(`Google Drive download failed: ${resp.status} ${await resp.text()}`);
-  const buffer = Buffer.from(await resp.arrayBuffer());
-  const contentType = resp.headers.get('content-type') || 'application/octet-stream';
-  return { buffer, contentType, fileName };
+  const headers = { Authorization: `Bearer ${accessToken}` };
+
+  // Attempt direct binary download
+  const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers });
+
+  if (resp.ok) {
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    const contentType = resp.headers.get('content-type') || 'application/octet-stream';
+    return { buffer, contentType, fileName };
+  }
+
+  // Google Workspace files (Docs/Sheets/Slides/Drawings) return 403 fileNotDownloadable
+  const body = await resp.text();
+  if (!(resp.status === 403 && body.includes('fileNotDownloadable'))) {
+    throw new Error(`Google Drive download failed: ${resp.status} ${body}`);
+  }
+
+  // Fetch file metadata to determine mimeType
+  const metaResp = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?fields=mimeType%2Cname`,
+    { headers },
+  );
+  if (!metaResp.ok) throw new Error(`Google Drive metadata fetch failed: ${metaResp.status}`);
+  const meta = await metaResp.json();
+
+  const exportInfo = GDRIVE_EXPORT_MIME[meta.mimeType as string];
+  const exportMime = exportInfo?.mime ?? 'application/pdf';
+  const exportExt  = exportInfo?.ext  ?? '.pdf';
+
+  const exportResp = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`,
+    { headers },
+  );
+  if (!exportResp.ok) throw new Error(`Google Drive export failed: ${exportResp.status} ${await exportResp.text()}`);
+
+  const buffer        = Buffer.from(await exportResp.arrayBuffer());
+  const baseName      = fileName.replace(/\.[^.]+$/, '') || fileName;
+  const exportFileName = `${baseName}${exportExt}`;
+  return { buffer, contentType: exportMime, fileName: exportFileName };
 }
 
 function mapGoogleDriveItem(f: any): FileItem {
