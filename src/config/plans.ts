@@ -38,3 +38,17 @@ export const PLAN_LIMITS: Record<string, PlanLimits> = {
 };
 
 export type PlanName = keyof typeof PLAN_LIMITS;
+
+// ─── Scan-specific limits ─────────────────────────────────────────────────────
+
+export interface ScanLimits {
+  sameCloudPerDay:  number;  // daily same-cloud scan quota (-1 = unlimited)
+  fileIndexPerMin:  number;  // file-index API calls per minute (each provider = 1 call)
+}
+
+export const SCAN_LIMITS: Record<string, ScanLimits> = {
+  free:       { sameCloudPerDay: 3,  fileIndexPerMin: 5  },
+  pro:        { sameCloudPerDay: -1, fileIndexPerMin: 20 },
+  business:   { sameCloudPerDay: -1, fileIndexPerMin: 60 },
+  enterprise: { sameCloudPerDay: -1, fileIndexPerMin: 60 },
+};

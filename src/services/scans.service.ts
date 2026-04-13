@@ -1,4 +1,6 @@
 import { supabaseAdmin } from '../config/supabase';
+import { getUserPlan } from './subscriptions.service';
+import { SCAN_LIMITS } from '../config/plans';
 
 // ─── Tier definitions (mirror of frontend scan.types.ts) ─────────────────────
 
@@ -105,8 +107,8 @@ export async function recordScanHistory(
     potentialSavings:     number;
   },
   scanCreditId?: string,
-) {
-  const { error } = await supabaseAdmin
+): Promise<string> {   // <-- now returns the record id
+  const { data, error } = await supabaseAdmin
     .from('scan_history')
     .insert({
       user_id:                userId,
@@ -115,10 +117,13 @@ export async function recordScanHistory(
       total_files_scanned:    stats.totalFilesScanned,
       total_size_scanned:     stats.totalSizeScanned,
       duplicate_groups_found: stats.duplicateGroupsFound,
-      potential_savings_bytes:stats.potentialSavings,
-    });
+      potential_savings_bytes: stats.potentialSavings,
+    })
+    .select('id')
+    .single();
 
   if (error) throw error;
+  return data.id as string;
 }
 
 // ─── Scan history for the user ────────────────────────────────────────────────
@@ -144,4 +149,81 @@ export async function expireStaleCredits(userId: string) {
     .eq('user_id', userId)
     .eq('status', 'active')
     .lt('expires_at', new Date().toISOString());
+}
+
+// ─── Plan-based scan quota check ─────────────────────────────────────────────
+
+/**
+ * Throws 429 if the user has exhausted their same-cloud scan quota for today.
+ * Cross-cloud is gate-kept by credits (handled separately), not by this function.
+ */
+export async function checkScanQuota(
+  userId: string,
+  mode: 'same-cloud' | 'cross-cloud',
+): Promise<void> {
+  if (mode === 'cross-cloud') return; // credits handle cross-cloud gating
+
+  const plan   = await getUserPlan(userId);
+  const limits = SCAN_LIMITS[plan] ?? SCAN_LIMITS['free'];
+
+  if (limits.sameCloudPerDay === -1) return; // unlimited
+
+  const startOfDay = new Date();
+  startOfDay.setUTCHours(0, 0, 0, 0);
+
+  const { count, error } = await supabaseAdmin
+    .from('scan_history')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('mode', 'same-cloud')
+    .gte('completed_at', startOfDay.toISOString());
+
+  if (error) return; // fail open on DB error
+
+  if ((count ?? 0) >= limits.sameCloudPerDay) {
+    const err: any = new Error(
+      `Free plan allows ${limits.sameCloudPerDay} same-cloud scans per day. ` +
+      `Upgrade to Pro for unlimited scans.`,
+    );
+    err.statusCode = 429;
+    throw err;
+  }
+}
+
+// ─── Scan quota summary (for frontend display) ────────────────────────────────
+
+export async function getScanQuota(userId: string) {
+  const plan   = await getUserPlan(userId);
+  const limits = SCAN_LIMITS[plan] ?? SCAN_LIMITS['free'];
+
+  const startOfDay = new Date();
+  startOfDay.setUTCHours(0, 0, 0, 0);
+  const endOfDay = new Date(startOfDay);
+  endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
+
+  const { count: usedToday } = await supabaseAdmin
+    .from('scan_history')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('mode', 'same-cloud')
+    .gte('completed_at', startOfDay.toISOString());
+
+  const { data: credits } = await supabaseAdmin
+    .from('scan_credits')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .gt('expires_at', new Date().toISOString());
+
+  return {
+    plan,
+    sameCloud: {
+      used:     usedToday ?? 0,
+      limit:    limits.sameCloudPerDay,             // -1 = unlimited
+      resetsAt: endOfDay.toISOString(),
+    },
+    crossCloud: {
+      creditsAvailable: (credits ?? []).length,
+    },
+  };
 }

@@ -11,6 +11,7 @@ import jobsRoutes          from './routes/jobs.routes';
 import subscriptionsRoutes from './routes/subscriptions.routes';
 import scansRoutes         from './routes/scans.routes';
 import { errorMiddleware } from './middleware/error.middleware';
+import { globalRateLimit } from './middleware/rate-limit.middleware';
 
 const app = express();
 
@@ -22,6 +23,7 @@ app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
+app.use(globalRateLimit);
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { fileIndexRateLimit } from '../middleware/rate-limit.middleware';
 import {
   listFiles,
   searchFiles,
@@ -17,7 +18,7 @@ const router = Router();
 // All file routes require authentication
 router.get( '/:providerId',                        authMiddleware, listFiles);
 router.get( '/:providerId/search',                 authMiddleware, searchFiles);
-router.get( '/:providerId/index',                  authMiddleware, indexFiles);
+router.get( '/:providerId/index',                  authMiddleware, fileIndexRateLimit, indexFiles);
 router.post('/:providerId/folder',                 authMiddleware, createFolder);
 router.post('/:providerId/upload',                 authMiddleware, uploadMiddleware, uploadFile);
 router.get( '/:providerId/:fileId/download',       authMiddleware, downloadFile);

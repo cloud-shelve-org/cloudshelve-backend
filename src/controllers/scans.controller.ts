@@ -7,6 +7,8 @@ import {
   recordScanHistory,
   getScanHistory,
   expireStaleCredits,
+  checkScanQuota,
+  getScanQuota,
 } from '../services/scans.service';
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
@@ -109,7 +111,11 @@ export async function createHistory(req: Request, res: Response, next: NextFunct
       return;
     }
     const { mode, scan_credit_id, stats } = parsed.data;
-    await recordScanHistory(
+
+    // Enforce plan quota before recording (also prevents abusive POSTs)
+    await checkScanQuota(req.user!.id, mode);
+
+    const id = await recordScanHistory(
       req.user!.id,
       mode,
       {
@@ -120,8 +126,8 @@ export async function createHistory(req: Request, res: Response, next: NextFunct
       },
       scan_credit_id,
     );
-    res.status(201).json({ success: true });
-  } catch (err) {
+    res.status(201).json({ success: true, data: { id } });
+  } catch (err: any) {
     next(err);
   }
 }
@@ -136,6 +142,19 @@ export async function listHistory(req: Request, res: Response, next: NextFunctio
     const parsed = historyQuerySchema.safeParse(req.query);
     const limit = parsed.success ? parsed.data.limit : 10;
     const data = await getScanHistory(req.user!.id, limit);
+    res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/scans/quota
+ * Returns the current user's scan quota usage and limits.
+ */
+export async function getQuota(req: Request, res: Response, next: NextFunction) {
+  try {
+    const data = await getScanQuota(req.user!.id);
     res.json({ success: true, data });
   } catch (err) {
     next(err);
