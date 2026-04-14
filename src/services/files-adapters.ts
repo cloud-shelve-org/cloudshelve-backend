@@ -204,6 +204,12 @@ export async function uploadFileStream(
       return uploadBoxFile(accessToken, parentId, fileName, mimeType, buf);
     }
     case 'mega': {
+      // If we know the file size, stream directly to MEGA (no RAM buffer).
+      // megajs upload() returns a Writable; pipe a Node.js Readable to it.
+      // Fallback to buffer only when size is unknown (size === 0).
+      if (size > 0) {
+        return streamUploadMega(accessToken, parentId, fileName, stream, size);
+      }
       const buf = await streamToBuffer(stream);
       return uploadMegaFile(accessToken, parentId, fileName, buf);
     }
@@ -1214,6 +1220,43 @@ async function uploadMegaFile(
 
     const uploadStream = parent.upload({ name: fileName, size: buffer.length }, buffer);
     const uploaded: any = await uploadStream.complete;
+    return mapMegaNode(uploaded, parentId);
+  });
+}
+
+/**
+ * Stream-upload to MEGA without buffering the entire file in RAM.
+ *
+ * megajs upload() returns a Node.js Writable stream; we convert the incoming
+ * Web ReadableStream to a Node.js Readable via Readable.fromWeb() and pipe it.
+ * The `size` must be known so MEGA can pre-initialise its AES-CTR cipher header
+ * (MEGA requires exact file size before the upload begins).
+ */
+async function streamUploadMega(
+  credentialsJson: string,
+  parentId: string | null,
+  fileName: string,
+  stream: ReadableStream<Uint8Array>,
+  size: number,
+): Promise<FileItem> {
+  const { Readable } = require('stream') as typeof import('stream');
+  // Convert Web ReadableStream → Node.js Readable (Node ≥ 17 / our target ≥ 20)
+  const nodeReadable = Readable.fromWeb(stream as any);
+
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const parent = parentId ? storage.files[parentId] : storage.root;
+    if (!parent) throw new Error('Parent folder not found');
+
+    // upload() without a second argument returns a Writable we pipe into.
+    // uploadStream.complete is a Promise<MegaFile> that resolves on success.
+    const uploadStream = parent.upload({ name: fileName, size });
+
+    // Surface upload errors on the nodeReadable side as well
+    const uploadComplete: Promise<any> = uploadStream.complete;
+
+    nodeReadable.pipe(uploadStream);
+
+    const uploaded = await uploadComplete;
     return mapMegaNode(uploaded, parentId);
   });
 }

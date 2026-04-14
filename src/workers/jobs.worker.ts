@@ -250,6 +250,13 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
   const cfg  = task.config ?? {};
   const type = task.type as 'copy' | 'move' | 'cleanup' | 'sync';
 
+  // Guard: skip if the task was already resolved (e.g. marked failed by recoverStalledTasks
+  // before BullMQ re-queued the stalled BullMQ job).
+  if (['failed', 'completed', 'cancelled'].includes(task.status)) {
+    console.log(`[jobs-worker] Task ${taskId} is already ${task.status} – skipping BullMQ re-run`);
+    return;
+  }
+
   if (!cfg.is_active) {
     console.log(`[jobs-worker] Task ${taskId} is inactive – skipping`);
     return;
@@ -513,22 +520,29 @@ let worker: Worker | null = null;
 async function recoverStalledTasks(): Promise<void> {
   const { data: stalled } = await supabaseAdmin
     .from('tasks')
-    .select('id')
+    .select('id, config')
     .eq('status', 'running');
 
   if (!stalled || stalled.length === 0) return;
 
-  const ids = stalled.map((t: any) => t.id as string);
-  console.log(`[jobs-worker] Recovering ${ids.length} stalled task(s): ${ids.join(', ')}`);
-  await supabaseAdmin
-    .from('tasks')
-    .update({
-      status:        'failed',
-      error_message: 'The worker restarted while this job was running. Retry to resume — already-transferred files will be skipped.',
-      completed_at:  new Date().toISOString(),
-      bull_job_id:   null,
-    })
-    .in('id', ids);
+  console.log(`[jobs-worker] Recovering ${stalled.length} stalled task(s): ${stalled.map((t: any) => t.id).join(', ')}`);
+
+  // Update each task individually so we can merge is_active into the existing config
+  await Promise.all(
+    stalled.map((t: any) =>
+      supabaseAdmin
+        .from('tasks')
+        .update({
+          status:        'failed',
+          error_message: 'The worker restarted while this job was running. Retry to resume — already-transferred files will be skipped.',
+          completed_at:  new Date().toISOString(),
+          bull_job_id:   null,
+          // Disable task so BullMQ re-run (stall re-queue) hits the is_active guard
+          config:        { ...(t.config ?? {}), is_active: false },
+        })
+        .eq('id', t.id),
+    ),
+  );
 }
 
 export function startJobsWorker(): void {
