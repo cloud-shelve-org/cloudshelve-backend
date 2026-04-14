@@ -1673,6 +1673,7 @@ export async function listTrashFiles(
     case 'google_drive': return cleanupGDriveTrash(accessToken, pageToken, pageSize);
     case 'dropbox':      return cleanupDropboxTrash(accessToken, pageToken, pageSize);
     case 'box':          return cleanupBoxTrash(accessToken, pageToken, pageSize);
+    case 'mega':         return cleanupMegaTrash(accessToken, pageToken, pageSize);
     default: return { items: [], nextPageToken: null };
   }
 }
@@ -1684,13 +1685,14 @@ export async function emptyProviderTrash(
   switch (providerType) {
     case 'google_drive': return cleanupGDriveEmptyTrash(accessToken);
     case 'box':          return cleanupBoxEmptyTrash(accessToken);
+    case 'mega':         return cleanupMegaEmptyTrash(accessToken);
     default: throw new Error(`Empty trash not supported for ${providerType}`);
   }
 }
 
 /** True when the provider exposes a trash/recycle-bin via its API. */
 export function providerSupportsTrash(providerType: ProviderType): boolean {
-  return ['google_drive', 'dropbox', 'box'].includes(providerType);
+  return ['google_drive', 'dropbox', 'box', 'mega'].includes(providerType);
 }
 
 // ─── Google Drive ─────────────────────────────────────────────────────────────
@@ -2052,5 +2054,60 @@ async function cleanupMegaOld(
       items: page,
       nextPageToken: offset + page.length < all.length ? String(offset + page.length) : null,
     };
+  });
+}
+
+async function cleanupMegaTrash(
+  credentialsJson: string,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    if (!storage.trash) return { items: [], nextPageToken: null };
+
+    // Flatten all file nodes under the trash root (recursive)
+    const all: FileItem[] = [];
+    function collect(node: any) {
+      for (const child of node.children ?? []) {
+        if (!child.directory) {
+          all.push(mapMegaNode(child, child.parent?.nodeId ?? null));
+        }
+        collect(child);
+      }
+    }
+    collect(storage.trash);
+
+    const offset = pageToken ? parseInt(pageToken, 10) : 0;
+    const page   = all.slice(offset, offset + pageSize);
+    return {
+      items: page,
+      nextPageToken: offset + page.length < all.length ? String(offset + page.length) : null,
+    };
+  });
+}
+
+async function cleanupMegaEmptyTrash(credentialsJson: string): Promise<void> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    if (!storage.trash) return;
+
+    // Delete each direct child of trash permanently — this removes the subtree.
+    const children: any[] = [...(storage.trash.children ?? [])];
+    await Promise.all(
+      children.map(
+        (node) =>
+          new Promise<void>((res, rej) => {
+            node.delete(true, (err: Error | null) => {
+              if (err) return rej(new Error('MEGA trash delete failed: ' + err.message));
+              res();
+            });
+          }),
+      ),
+    );
+
+    // Keep in-memory tree consistent
+    try {
+      storage.trash.children = [];
+      for (const child of children) delete storage.files[child.nodeId];
+    } catch { /* non-fatal */ }
   });
 }
