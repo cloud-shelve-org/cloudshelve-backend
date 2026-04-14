@@ -275,11 +275,14 @@ async function searchGoogleDriveFiles(
   pageToken: string | null,
   pageSize: number,
 ): Promise<ListFilesResult> {
+  // orderBy is not permitted with fullText queries in Drive v3 — the API
+  // returns results in relevance order automatically when fullText is used.
   const params = new URLSearchParams({
     q: `fullText contains '${query.replace(/'/g, "\\'")}' and trashed = false`,
     fields: GDRIVE_FIELDS,
-    orderBy: 'relevance',
     pageSize: String(pageSize),
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
     ...(pageToken ? { pageToken } : {}),
   });
   const resp = await fetch(
