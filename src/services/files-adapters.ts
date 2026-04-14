@@ -1607,3 +1607,410 @@ async function indexMegaFiles(
     };
   });
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLEANUP ADAPTERS — large files, old files, trash
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Public dispatchers ───────────────────────────────────────────────────────
+
+export async function listLargeFiles(
+  providerType: ProviderType,
+  accessToken: string,
+  minSizeBytes: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  switch (providerType) {
+    case 'google_drive': return cleanupGDriveLarge(accessToken, minSizeBytes, pageToken, pageSize);
+    case 'onedrive':     return cleanupOneDriveLarge(accessToken, minSizeBytes, pageToken, pageSize);
+    case 'dropbox':      return cleanupDropboxLarge(accessToken, minSizeBytes, pageToken, pageSize);
+    case 'box':          return cleanupBoxLarge(accessToken, minSizeBytes, pageToken, pageSize);
+    case 'mega':         return cleanupMegaLarge(accessToken, minSizeBytes, pageToken, pageSize);
+    default: throw new Error(`Large-file listing not supported for ${providerType}`);
+  }
+}
+
+export async function listOldFiles(
+  providerType: ProviderType,
+  accessToken: string,
+  olderThanDays: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  switch (providerType) {
+    case 'google_drive': return cleanupGDriveOld(accessToken, olderThanDays, pageToken, pageSize);
+    case 'onedrive':     return cleanupOneDriveOld(accessToken, olderThanDays, pageToken, pageSize);
+    case 'dropbox':      return cleanupDropboxOld(accessToken, olderThanDays, pageToken, pageSize);
+    case 'box':          return cleanupBoxOld(accessToken, olderThanDays, pageToken, pageSize);
+    case 'mega':         return cleanupMegaOld(accessToken, olderThanDays, pageToken, pageSize);
+    default: throw new Error(`Old-file listing not supported for ${providerType}`);
+  }
+}
+
+export async function listTrashFiles(
+  providerType: ProviderType,
+  accessToken: string,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  switch (providerType) {
+    case 'google_drive': return cleanupGDriveTrash(accessToken, pageToken, pageSize);
+    case 'dropbox':      return cleanupDropboxTrash(accessToken, pageToken, pageSize);
+    case 'box':          return cleanupBoxTrash(accessToken, pageToken, pageSize);
+    default: return { items: [], nextPageToken: null };
+  }
+}
+
+export async function emptyProviderTrash(
+  providerType: ProviderType,
+  accessToken: string,
+): Promise<void> {
+  switch (providerType) {
+    case 'google_drive': return cleanupGDriveEmptyTrash(accessToken);
+    case 'box':          return cleanupBoxEmptyTrash(accessToken);
+    default: throw new Error(`Empty trash not supported for ${providerType}`);
+  }
+}
+
+/** True when the provider exposes a trash/recycle-bin via its API. */
+export function providerSupportsTrash(providerType: ProviderType): boolean {
+  return ['google_drive', 'dropbox', 'box'].includes(providerType);
+}
+
+// ─── Google Drive ─────────────────────────────────────────────────────────────
+
+async function cleanupGDriveLarge(
+  accessToken: string,
+  minSizeBytes: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const params = new URLSearchParams({
+    q: `trashed = false and mimeType != '${GDRIVE_FOLDER_MIME}' and size > ${minSizeBytes}`,
+    fields: GDRIVE_FIELDS,
+    orderBy: 'quotaBytesUsed desc',
+    pageSize: String(pageSize),
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
+    ...(pageToken ? { pageToken } : {}),
+  });
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`Google Drive large files failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  return { items: (data.files || []).map(mapGoogleDriveItem), nextPageToken: data.nextPageToken || null };
+}
+
+async function cleanupGDriveOld(
+  accessToken: string,
+  olderThanDays: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+  const params = new URLSearchParams({
+    q: `trashed = false and mimeType != '${GDRIVE_FOLDER_MIME}' and modifiedTime < '${cutoff}'`,
+    fields: GDRIVE_FIELDS,
+    orderBy: 'modifiedTime',
+    pageSize: String(pageSize),
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
+    ...(pageToken ? { pageToken } : {}),
+  });
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`Google Drive old files failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  return { items: (data.files || []).map(mapGoogleDriveItem), nextPageToken: data.nextPageToken || null };
+}
+
+async function cleanupGDriveTrash(
+  accessToken: string,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const params = new URLSearchParams({
+    q: 'trashed = true',
+    fields: GDRIVE_FIELDS,
+    pageSize: String(pageSize),
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
+    ...(pageToken ? { pageToken } : {}),
+  });
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`Google Drive trash list failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  return { items: (data.files || []).map(mapGoogleDriveItem), nextPageToken: data.nextPageToken || null };
+}
+
+async function cleanupGDriveEmptyTrash(accessToken: string): Promise<void> {
+  const resp = await fetch('https://www.googleapis.com/drive/v3/files/trash', {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  // 204 No Content is the success response
+  if (!resp.ok && resp.status !== 204) {
+    throw new Error(`Google Drive empty trash failed: ${await resp.text()}`);
+  }
+}
+
+// ─── OneDrive ─────────────────────────────────────────────────────────────────
+
+const ONEDRIVE_SEARCH_FIELDS =
+  'id,name,size,lastModifiedDateTime,file,folder,parentReference,@microsoft.graph.downloadUrl';
+
+async function cleanupOneDriveLarge(
+  accessToken: string,
+  minSizeBytes: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const params = new URLSearchParams({
+    '$top': String(pageSize),
+    '$orderby': 'size desc',
+    '$select': ONEDRIVE_SEARCH_FIELDS,
+    ...(pageToken ? { '$skiptoken': pageToken } : {}),
+  });
+  const resp = await fetch(
+    `https://graph.microsoft.com/v1.0/me/drive/root/search(q='')/?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`OneDrive large files failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  const items = (data.value || [])
+    .map(mapOneDriveItem)
+    .filter((f: FileItem) => f.kind === 'file' && (f.size ?? 0) >= minSizeBytes);
+  const nextLink: string | null = data['@odata.nextLink'] || null;
+  const nextPageToken = nextLink ? (new URL(nextLink).searchParams.get('$skiptoken') ?? null) : null;
+  return { items, nextPageToken };
+}
+
+async function cleanupOneDriveOld(
+  accessToken: string,
+  olderThanDays: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+  const params = new URLSearchParams({
+    '$top': String(pageSize),
+    '$orderby': 'lastModifiedDateTime asc',
+    '$select': ONEDRIVE_SEARCH_FIELDS,
+    ...(pageToken ? { '$skiptoken': pageToken } : {}),
+  });
+  const resp = await fetch(
+    `https://graph.microsoft.com/v1.0/me/drive/root/search(q='')/?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`OneDrive old files failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  const items = (data.value || [])
+    .map(mapOneDriveItem)
+    .filter((f: FileItem) =>
+      f.kind === 'file' && f.modifiedAt != null && f.modifiedAt < cutoff,
+    );
+  const nextLink: string | null = data['@odata.nextLink'] || null;
+  const nextPageToken = nextLink ? (new URL(nextLink).searchParams.get('$skiptoken') ?? null) : null;
+  return { items, nextPageToken };
+}
+
+// ─── Dropbox ──────────────────────────────────────────────────────────────────
+
+async function cleanupDropboxLarge(
+  accessToken: string,
+  minSizeBytes: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  // Dropbox doesn't support server-side size sort; list root and sort client-side
+  const { items, nextPageToken } = await listDropboxFiles(accessToken, null, pageToken, Math.min(pageSize * 3, 200));
+  const filtered = items
+    .filter((f) => f.kind === 'file' && (f.size ?? 0) >= minSizeBytes)
+    .sort((a, b) => (b.size ?? 0) - (a.size ?? 0))
+    .slice(0, pageSize);
+  return { items: filtered, nextPageToken };
+}
+
+async function cleanupDropboxOld(
+  accessToken: string,
+  olderThanDays: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+  const { items, nextPageToken } = await listDropboxFiles(accessToken, null, pageToken, Math.min(pageSize * 3, 200));
+  const filtered = items
+    .filter((f) => f.kind === 'file' && f.modifiedAt != null && f.modifiedAt < cutoff)
+    .sort((a, b) => (a.modifiedAt ?? '').localeCompare(b.modifiedAt ?? ''))
+    .slice(0, pageSize);
+  return { items: filtered, nextPageToken };
+}
+
+async function cleanupDropboxTrash(
+  accessToken: string,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const body: any = pageToken
+    ? { cursor: pageToken }
+    : { path: '', limit: pageSize, include_deleted: true, recursive: false };
+  const url = pageToken
+    ? 'https://api.dropboxapi.com/2/files/list_folder/continue'
+    : 'https://api.dropboxapi.com/2/files/list_folder';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`Dropbox trash list failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  // Only entries with .tag === 'deleted'
+  const items = (data.entries || [])
+    .filter((e: any) => e['.tag'] === 'deleted')
+    .map(mapDropboxItem);
+  return { items, nextPageToken: data.has_more ? data.cursor : null };
+}
+
+// ─── Box ──────────────────────────────────────────────────────────────────────
+
+async function cleanupBoxLarge(
+  accessToken: string,
+  minSizeBytes: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const offset = pageToken ? parseInt(pageToken, 10) : 0;
+  const params = new URLSearchParams({
+    fields: 'id,name,type,size,modified_at,parent',
+    limit:  String(pageSize),
+    offset: String(offset),
+    sort:   'size',
+    direction: 'DESC',
+  });
+  const resp = await fetch(
+    `https://api.box.com/2.0/folders/0/items?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`Box large files failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  const items = (data.entries || [])
+    .map(mapBoxItem)
+    .filter((f: FileItem) => f.kind === 'file' && (f.size ?? 0) >= minSizeBytes);
+  const nextOffset = offset + (data.entries?.length || 0);
+  const nextPageToken = nextOffset < (data.total_count || 0) ? String(nextOffset) : null;
+  return { items, nextPageToken };
+}
+
+async function cleanupBoxOld(
+  accessToken: string,
+  olderThanDays: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+  const offset = pageToken ? parseInt(pageToken, 10) : 0;
+  const params = new URLSearchParams({
+    fields: 'id,name,type,size,modified_at,parent',
+    limit:  String(pageSize),
+    offset: String(offset),
+    sort:   'date',
+    direction: 'ASC',
+  });
+  const resp = await fetch(
+    `https://api.box.com/2.0/folders/0/items?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`Box old files failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  const items = (data.entries || [])
+    .map(mapBoxItem)
+    .filter((f: FileItem) =>
+      f.kind === 'file' && f.modifiedAt != null && f.modifiedAt < cutoff,
+    );
+  const nextOffset = offset + (data.entries?.length || 0);
+  const nextPageToken = nextOffset < (data.total_count || 0) ? String(nextOffset) : null;
+  return { items, nextPageToken };
+}
+
+async function cleanupBoxTrash(
+  accessToken: string,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  const offset = pageToken ? parseInt(pageToken, 10) : 0;
+  const params = new URLSearchParams({
+    fields: 'id,name,type,size,content_modified_at,parent',
+    limit:  String(pageSize),
+    offset: String(offset),
+  });
+  const resp = await fetch(
+    `https://api.box.com/2.0/folders/trash/items?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) throw new Error(`Box trash list failed: ${await resp.text()}`);
+  const data: any = await resp.json();
+  const nextOffset = offset + (data.entries?.length || 0);
+  const nextPageToken = nextOffset < (data.total_count || 0) ? String(nextOffset) : null;
+  return { items: (data.entries || []).map(mapBoxItem), nextPageToken };
+}
+
+async function cleanupBoxEmptyTrash(accessToken: string): Promise<void> {
+  const resp = await fetch('https://api.box.com/2.0/folders/trash', {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok && resp.status !== 204) {
+    throw new Error(`Box empty trash failed: ${await resp.text()}`);
+  }
+}
+
+// ─── MEGA ─────────────────────────────────────────────────────────────────────
+
+async function cleanupMegaLarge(
+  credentialsJson: string,
+  minSizeBytes: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const all: FileItem[] = (Object.values(storage.files) as any[])
+      .filter((n) => !n.directory && (n.size ?? 0) >= minSizeBytes)
+      .sort((a, b) => (b.size ?? 0) - (a.size ?? 0))
+      .map((n) => mapMegaNode(n, n.parent?.nodeId ?? null));
+    const offset = pageToken ? parseInt(pageToken, 10) : 0;
+    const page   = all.slice(offset, offset + pageSize);
+    return {
+      items: page,
+      nextPageToken: offset + page.length < all.length ? String(offset + page.length) : null,
+    };
+  });
+}
+
+async function cleanupMegaOld(
+  credentialsJson: string,
+  olderThanDays: number,
+  pageToken: string | null,
+  pageSize: number,
+): Promise<ListFilesResult> {
+  return withMegaStorage(credentialsJson, async (storage) => {
+    const cutoffMs = Date.now() - olderThanDays * 86_400_000;
+    const all: FileItem[] = (Object.values(storage.files) as any[])
+      .filter((n) => !n.directory && n.timestamp != null && n.timestamp * 1000 < cutoffMs)
+      .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
+      .map((n) => mapMegaNode(n, n.parent?.nodeId ?? null));
+    const offset = pageToken ? parseInt(pageToken, 10) : 0;
+    const page   = all.slice(offset, offset + pageSize);
+    return {
+      items: page,
+      nextPageToken: offset + page.length < all.length ? String(offset + page.length) : null,
+    };
+  });
+}
