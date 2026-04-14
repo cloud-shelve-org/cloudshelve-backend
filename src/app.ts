@@ -10,6 +10,7 @@ import filesRoutes         from './routes/files.routes';
 import jobsRoutes          from './routes/jobs.routes';
 import subscriptionsRoutes from './routes/subscriptions.routes';
 import scansRoutes         from './routes/scans.routes';
+import cleanupRoutes       from './routes/cleanup.routes';
 import { errorMiddleware } from './middleware/error.middleware';
 import { globalRateLimit } from './middleware/rate-limit.middleware';
 
@@ -36,6 +37,7 @@ app.use('/api/files',         filesRoutes);
 app.use('/api/jobs',          jobsRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/api/scans',         scansRoutes);
+app.use('/api/cleanup',      cleanupRoutes);
 
 app.use(errorMiddleware);
 

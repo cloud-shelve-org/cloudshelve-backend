@@ -12,7 +12,13 @@ import {
   downloadFileStream as adapterDownloadFileStream,
   uploadFileStream as adapterUploadFileStream,
   indexFiles as adapterIndexFiles,
+  listLargeFiles as adapterListLargeFiles,
+  listOldFiles as adapterListOldFiles,
+  listTrashFiles as adapterListTrashFiles,
+  emptyProviderTrash as adapterEmptyProviderTrash,
+  providerSupportsTrash as adapterProviderSupportsTrash,
 } from './files-adapters';
+import { getUserPlan } from './subscriptions.service';
 
 const DB_TYPE_TO_API: Record<string, ProviderType> = {
   gdrive: 'google_drive',
@@ -212,4 +218,85 @@ export async function indexProviderFiles(
 ) {
   const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
   return adapterIndexFiles(providerType, accessToken, pageToken, maxPerPage);
+}
+
+// ─── Cleanup service functions ────────────────────────────────────────────────
+
+export async function listProviderLargeFiles(
+  userId: string,
+  providerId: string,
+  minSizeMb: number,
+  pageToken: string | null,
+  pageSize: number,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  const minSizeBytes = minSizeMb * 1024 * 1024;
+  return adapterListLargeFiles(providerType, accessToken, minSizeBytes, pageToken, pageSize);
+}
+
+export async function listProviderOldFiles(
+  userId: string,
+  providerId: string,
+  olderThanDays: number,
+  pageToken: string | null,
+  pageSize: number,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterListOldFiles(providerType, accessToken, olderThanDays, pageToken, pageSize);
+}
+
+export async function listProviderTrashFiles(
+  userId: string,
+  providerId: string,
+  pageToken: string | null,
+  pageSize: number,
+) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterListTrashFiles(providerType, accessToken, pageToken, pageSize);
+}
+
+export async function emptyProviderTrashFiles(userId: string, providerId: string) {
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+  return adapterEmptyProviderTrash(providerType, accessToken);
+}
+
+/**
+ * Bulk-delete files. Pro+ plan only.
+ * Returns counts of succeeded and failed deletions.
+ */
+export async function bulkDeleteProviderFiles(
+  userId: string,
+  providerId: string,
+  fileIds: string[],
+) {
+  const plan = await getUserPlan(userId);
+  if (plan === 'free') {
+    const err: any = new Error('Bulk delete is available on Pro and higher plans.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
+
+  let succeeded = 0;
+  let failed = 0;
+  const errors: Array<{ fileId: string; message: string }> = [];
+
+  await Promise.all(
+    fileIds.map(async (fileId) => {
+      try {
+        await adapterDeleteFile(providerType, accessToken, fileId, null);
+        succeeded++;
+      } catch (err: any) {
+        failed++;
+        errors.push({ fileId, message: err?.message ?? 'Unknown error' });
+      }
+    }),
+  );
+
+  return { succeeded, failed, errors };
+}
+
+export function checkProviderSupportsTrash(providerType: string): boolean {
+  return adapterProviderSupportsTrash(providerType as any);
 }
