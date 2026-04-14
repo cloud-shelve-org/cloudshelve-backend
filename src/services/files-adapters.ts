@@ -1055,35 +1055,64 @@ async function streamDownloadBox(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Open a megajs Storage session and call `fn` with it, then close.
- * `credentialsJson` is a JSON string containing `{ email, password }`.
+ * Module-level MEGA session pool.
+ *
+ * MEGA login (autologin + autoload of the full file tree) can take 20–60 s on
+ * large accounts.  We cache the open Storage promise keyed by the raw credentials
+ * JSON so that every subsequent adapter call within the same process reuses the
+ * same session — login happens exactly once per set of credentials.
+ *
+ * If login fails or times out the promise is removed so the next call retries.
  */
-function withMegaStorage<T>(
-  credentialsJson: string,
-  fn: (storage: any) => Promise<T>,
-): Promise<T> {
-  return new Promise((resolve, reject) => {
+const _megaSessionCache = new Map<string, Promise<any>>();
+
+function acquireMegaSession(credentialsJson: string): Promise<any> {
+  const cached = _megaSessionCache.get(credentialsJson);
+  if (cached) return cached;
+
+  const promise = new Promise<any>((resolve, reject) => {
     const { email, password } = JSON.parse(credentialsJson);
     const megajs = require('megajs');
     const Storage = megajs.Storage ?? megajs.default?.Storage ?? megajs;
 
+    let settled = false;
+    const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+    // 90 s login timeout — large accounts need time to load the full file tree.
+    const timer = setTimeout(() => {
+      _megaSessionCache.delete(credentialsJson); // allow retry
+      settle(() => reject(new Error('MEGA login timeout')));
+    }, 90_000);
+
     const storage = new Storage(
       { email, password, autologin: true, autoload: true },
-      async (err: Error | null) => {
-        if (err) return reject(new Error('MEGA login failed: ' + err.message));
-        try {
-          const result = await fn(storage);
-          resolve(result);
-        } catch (e) {
-          reject(e);
-        } finally {
-          try { storage.close(); } catch { /* ignore */ }
+      (err: Error | null) => {
+        clearTimeout(timer);
+        if (err) {
+          _megaSessionCache.delete(credentialsJson);
+          return settle(() => reject(new Error('MEGA login failed: ' + err.message)));
         }
+        settle(() => resolve(storage));
       },
     );
-
-    setTimeout(() => reject(new Error('MEGA login timeout')), 20_000);
   });
+
+  _megaSessionCache.set(credentialsJson, promise);
+  // Remove failed entries so callers can retry
+  promise.catch(() => _megaSessionCache.delete(credentialsJson));
+  return promise;
+}
+
+/**
+ * Run `fn` with an open megajs Storage session for the given credentials.
+ * The session is kept alive and reused across calls (no per-call login).
+ */
+async function withMegaStorage<T>(
+  credentialsJson: string,
+  fn: (storage: any) => Promise<T>,
+): Promise<T> {
+  const storage = await acquireMegaSession(credentialsJson);
+  return fn(storage);
 }
 
 function mapMegaNode(node: any, parentId: string | null): FileItem {
