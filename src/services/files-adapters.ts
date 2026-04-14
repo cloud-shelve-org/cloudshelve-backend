@@ -1216,24 +1216,14 @@ async function deleteMegaFile(
 
     await new Promise<void>((res, rej) => {
       // permanent = true → bypass MEGA trash, reclaim quota immediately.
-      // The in-memory tree is updated manually below so subsequent list
-      // calls within the same cached session reflect the deletion.
+      // Do NOT manually mutate storage.files after the callback — megajs
+      // processes a server-push event asynchronously and accesses node.parent
+      // internally; deleting the entry early causes a TypeError in megajs.
       node.delete(true, (err: Error | null) => {
         if (err) return rej(new Error('MEGA delete failed: ' + err.message));
         res();
       });
     });
-
-    // Keep the in-memory session tree consistent so we don't need to
-    // invalidate the (expensive) cached login session.
-    try {
-      delete storage.files[fileId];
-      if (node.parent?.children) {
-        node.parent.children = node.parent.children.filter(
-          (c: any) => c.nodeId !== fileId,
-        );
-      }
-    } catch { /* non-fatal — next login will refresh */ }
   });
 }
 
@@ -2090,24 +2080,20 @@ async function cleanupMegaEmptyTrash(credentialsJson: string): Promise<void> {
   return withMegaStorage(credentialsJson, async (storage) => {
     if (!storage.trash) return;
 
-    // Delete each direct child of trash permanently — this removes the subtree.
+    // Snapshot the children list before any deletes.
+    // Delete sequentially — parallel deletes cause megajs race conditions:
+    // its internal event handler accesses node.parent on nodes that have
+    // already been removed, throwing TypeError.
+    // Do NOT manually mutate storage.files — megajs handles that itself
+    // via its own server-push event processing.
     const children: any[] = [...(storage.trash.children ?? [])];
-    await Promise.all(
-      children.map(
-        (node) =>
-          new Promise<void>((res, rej) => {
-            node.delete(true, (err: Error | null) => {
-              if (err) return rej(new Error('MEGA trash delete failed: ' + err.message));
-              res();
-            });
-          }),
-      ),
-    );
-
-    // Keep in-memory tree consistent
-    try {
-      storage.trash.children = [];
-      for (const child of children) delete storage.files[child.nodeId];
-    } catch { /* non-fatal */ }
+    for (const node of children) {
+      await new Promise<void>((res, rej) => {
+        node.delete(true, (err: Error | null) => {
+          if (err) return rej(new Error('MEGA trash delete failed: ' + err.message));
+          res();
+        });
+      });
+    }
   });
 }
