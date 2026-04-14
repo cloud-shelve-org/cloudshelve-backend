@@ -131,6 +131,86 @@ export interface DownloadResult {
   fileName: string;
 }
 
+// ─── Stream helpers ───────────────────────────────────────────────────────────
+
+function bufferToStream(buf: Buffer): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) { controller.enqueue(buf); controller.close(); },
+  });
+}
+
+async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+}
+
+export interface DownloadStreamResult {
+  stream: ReadableStream<Uint8Array>;
+  contentType: string;
+  fileName: string;
+  /** Byte count from Content-Length header; 0 if unknown. */
+  size: number;
+}
+
+/**
+ * Like downloadFile but returns a streaming body instead of a full Buffer.
+ * Use in background workers to avoid loading large files into memory.
+ */
+export async function downloadFileStream(
+  providerType: ProviderType,
+  accessToken: string,
+  fileId: string,
+  fileName: string,
+  filePath?: string | null,
+): Promise<DownloadStreamResult> {
+  switch (providerType) {
+    case 'google_drive': return streamDownloadGoogleDrive(accessToken, fileId, fileName);
+    case 'onedrive':     return streamDownloadOneDrive(accessToken, fileId, fileName);
+    case 'dropbox':      return streamDownloadDropbox(accessToken, filePath || fileId, fileName);
+    case 'box':          return streamDownloadBox(accessToken, fileId, fileName);
+    case 'mega': {
+      const { buffer, contentType, fileName: fn } = await downloadMegaFile(accessToken, fileId, fileName);
+      return { stream: bufferToStream(buffer), contentType, fileName: fn, size: buffer.length };
+    }
+    default: throw new Error(`Streaming download not supported for ${providerType}`);
+  }
+}
+
+/**
+ * Like uploadFile but accepts a ReadableStream instead of a Buffer.
+ * Pair with downloadFileStream for memory-efficient large-file transfers.
+ */
+export async function uploadFileStream(
+  providerType: ProviderType,
+  accessToken: string,
+  parentId: string | null,
+  fileName: string,
+  mimeType: string,
+  stream: ReadableStream<Uint8Array>,
+  size: number,
+): Promise<FileItem> {
+  switch (providerType) {
+    case 'google_drive': return streamUploadGoogleDrive(accessToken, parentId, fileName, mimeType, stream, size);
+    case 'onedrive':     return streamUploadOneDrive(accessToken, parentId, fileName, mimeType, stream, size);
+    case 'dropbox':      return streamUploadDropbox(accessToken, parentId, fileName, stream);
+    case 'box': {
+      const buf = await streamToBuffer(stream);
+      return uploadBoxFile(accessToken, parentId, fileName, mimeType, buf);
+    }
+    case 'mega': {
+      const buf = await streamToBuffer(stream);
+      return uploadMegaFile(accessToken, parentId, fileName, buf);
+    }
+    default: throw new Error(`Streaming upload not supported for ${providerType}`);
+  }
+}
+
 export async function downloadFile(
   providerType: ProviderType,
   accessToken: string,
@@ -389,6 +469,59 @@ function mapGoogleDriveItem(f: any): FileItem {
   };
 }
 
+// ─── Google Drive streaming ───────────────────────────────────────────────────
+
+async function streamDownloadGoogleDrive(
+  accessToken: string, fileId: string, fileName: string,
+): Promise<DownloadStreamResult> {
+  const headers = { Authorization: `Bearer ${accessToken}` };
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`,
+    { headers },
+  );
+  if (resp.ok && resp.body) {
+    return {
+      stream: resp.body,
+      contentType: resp.headers.get('content-type') || 'application/octet-stream',
+      fileName,
+      size: parseInt(resp.headers.get('content-length') || '0', 10),
+    };
+  }
+  // Workspace file (e.g. Google Docs) — fall back to export buffer (typically small)
+  const { buffer, contentType, fileName: fn } = await downloadGoogleDriveFile(accessToken, fileId, fileName);
+  return { stream: bufferToStream(buffer), contentType, fileName: fn, size: buffer.length };
+}
+
+async function streamUploadGoogleDrive(
+  accessToken: string, parentId: string | null, fileName: string,
+  mimeType: string, stream: ReadableStream<Uint8Array>, size: number,
+): Promise<FileItem> {
+  const initHeaders: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    'X-Upload-Content-Type': mimeType,
+  };
+  if (size > 0) initHeaders['X-Upload-Content-Length'] = String(size);
+
+  const initResp = await fetch(
+    `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=${GDRIVE_FILE_FIELDS}`,
+    { method: 'POST', headers: initHeaders, body: JSON.stringify({ name: fileName, parents: [parentId || 'root'] }) },
+  );
+  if (!initResp.ok) throw new Error(`Google Drive resumable init failed: ${await initResp.text()}`);
+  const uploadUrl = initResp.headers.get('location');
+  if (!uploadUrl) throw new Error('Google Drive: missing resumable upload Location header');
+
+  const putHeaders: Record<string, string> = { 'Content-Type': mimeType };
+  if (size > 0) putHeaders['Content-Length'] = String(size);
+
+  const putResp = await fetch(uploadUrl, {
+    method: 'PUT', headers: putHeaders, body: stream,
+    ...({ duplex: 'half' } as any),
+  });
+  if (!putResp.ok) throw new Error(`Google Drive upload failed: ${await putResp.text()}`);
+  return mapGoogleDriveItem(await putResp.json());
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // ONEDRIVE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -510,6 +643,40 @@ function mapOneDriveItem(f: any): FileItem {
     path: f.parentReference?.path || null,
     parentId: f.parentReference?.id || null,
   };
+}
+
+// ─── OneDrive streaming ───────────────────────────────────────────────────────
+
+async function streamDownloadOneDrive(
+  accessToken: string, fileId: string, fileName: string,
+): Promise<DownloadStreamResult> {
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/content`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error(`OneDrive download failed: ${resp.status} ${await resp.text()}`);
+  return {
+    stream: resp.body!,
+    contentType: resp.headers.get('content-type') || 'application/octet-stream',
+    fileName,
+    size: parseInt(resp.headers.get('content-length') || '0', 10),
+  };
+}
+
+async function streamUploadOneDrive(
+  accessToken: string, parentId: string | null, fileName: string,
+  mimeType: string, stream: ReadableStream<Uint8Array>, size: number,
+): Promise<FileItem> {
+  const url = parentId
+    ? `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${encodeURIComponent(fileName)}:/content`
+    : `https://graph.microsoft.com/v1.0/me/drive/root:/${encodeURIComponent(fileName)}:/content`;
+  const headers: Record<string, string> = { Authorization: `Bearer ${accessToken}`, 'Content-Type': mimeType };
+  if (size > 0) headers['Content-Length'] = String(size);
+  const resp = await fetch(url, {
+    method: 'PUT', headers, body: stream,
+    ...({ duplex: 'half' } as any),
+  });
+  if (!resp.ok) throw new Error(`OneDrive upload failed: ${await resp.text()}`);
+  return mapOneDriveItem(await resp.json());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -676,6 +843,48 @@ function mapDropboxItem(f: any): FileItem {
   };
 }
 
+// ─── Dropbox streaming ────────────────────────────────────────────────────────
+
+async function streamDownloadDropbox(
+  accessToken: string, filePath: string, fileName: string,
+): Promise<DownloadStreamResult> {
+  const resp = await fetch('https://content.dropboxapi.com/2/files/download', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Dropbox-API-Arg': JSON.stringify({ path: filePath }),
+      'Content-Type': 'text/plain; charset=dropbox-cors-hack',
+    },
+  });
+  if (!resp.ok) throw new Error(`Dropbox download failed: ${resp.status} ${await resp.text()}`);
+  return {
+    stream: resp.body!,
+    contentType: resp.headers.get('content-type') || 'application/octet-stream',
+    fileName,
+    size: parseInt(resp.headers.get('content-length') || '0', 10),
+  };
+}
+
+async function streamUploadDropbox(
+  accessToken: string, parentId: string | null, fileName: string,
+  stream: ReadableStream<Uint8Array>,
+): Promise<FileItem> {
+  const parentPath = parentId && !parentId.startsWith('id:') ? parentId : '';
+  const path = `${parentPath}/${fileName}`.replace('//', '/');
+  const resp = await fetch('https://content.dropboxapi.com/2/files/upload', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/octet-stream',
+      'Dropbox-API-Arg': JSON.stringify({ path, mode: 'add', autorename: true }),
+    },
+    body: stream,
+    ...({ duplex: 'half' } as any),
+  });
+  if (!resp.ok) throw new Error(`Dropbox upload failed: ${await resp.text()}`);
+  return mapDropboxItem(await resp.json());
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // BOX
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -815,6 +1024,23 @@ function mapBoxItem(f: any): FileItem {
     downloadUrl: null,
     path: null,
     parentId: f.parent?.id || null,
+  };
+}
+
+// ─── Box streaming ────────────────────────────────────────────────────────────
+
+async function streamDownloadBox(
+  accessToken: string, fileId: string, fileName: string,
+): Promise<DownloadStreamResult> {
+  const resp = await fetch(`https://api.box.com/2.0/files/${fileId}/content`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) throw new Error(`Box download failed: ${resp.status} ${await resp.text()}`);
+  return {
+    stream: resp.body!,
+    contentType: resp.headers.get('content-type') || 'application/octet-stream',
+    fileName,
+    size: parseInt(resp.headers.get('content-length') || '0', 10),
   };
 }
 

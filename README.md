@@ -144,24 +144,28 @@ cloudshelve-backend/
 │   │   ├── files.controller.ts         # File CRUD endpoints
 │   │   ├── jobs.controller.ts          # Scheduled job CRUD endpoints
 │   │   ├── legal.controller.ts         # Terms & privacy HTML pages
-│   │   └── providers.controller.ts     # Provider CRUD, OAuth flow, deep-link redirect
+│   │   ├── providers.controller.ts     # Provider CRUD, OAuth flow, deep-link redirect
+│   │   └── scans.controller.ts         # Duplicate scan history + quota endpoints
 │   ├── lib/
-│   │   └── credentials-crypto.ts       # AES-256-GCM encrypt/decrypt for stored credentials
+│   │   ├── credentials-crypto.ts       # AES-256-GCM encrypt/decrypt for stored credentials
+│   │   └── job-progress.ts             # Redis per-file progress tracking for job idempotency
 │   ├── middleware/
-│   │   ├── auth.middleware.ts          # Validates Supabase access tokens
+│   │   ├── auth.middleware.ts          # Validates Supabase JWT (Bearer header or ?token= param)
 │   │   └── error.middleware.ts         # Global error handler
 │   ├── routes/
 │   │   ├── auth.routes.ts
 │   │   ├── files.routes.ts
 │   │   ├── jobs.routes.ts              # GET|POST /api/jobs, PATCH /:id/toggle, etc.
 │   │   ├── legal.routes.ts
-│   │   └── providers.routes.ts
+│   │   ├── providers.routes.ts
+│   │   └── scans.routes.ts             # GET|POST /api/scans, DELETE /api/scans/history/:id
 │   ├── services/
-│   │   ├── files-adapters.ts           # Per-provider file ops (all 6 providers, full CRUD)
-│   │   ├── files.service.ts            # Token resolution + adapter dispatch
+│   │   ├── files-adapters.ts           # Per-provider file ops (all 6 providers, full CRUD + streaming)
+│   │   ├── files.service.ts            # Token resolution + adapter dispatch + copyProviderFile
 │   │   ├── jobs.service.ts             # Job CRUD, computeNextRunAt, BullMQ scheduling
 │   │   ├── provider-adapters.ts        # Per-provider OAuth, user info, quota, revoke, refresh
-│   │   └── providers.service.ts        # Provider connect, sync, disconnect
+│   │   ├── providers.service.ts        # Provider connect, sync, disconnect
+│   │   └── scans.service.ts            # Scan history CRUD, quota checks
 │   ├── types/
 │   │   └── express.d.ts                # Augments req.user on Express Request
 │   ├── validators/
@@ -169,7 +173,7 @@ cloudshelve-backend/
 │   │   ├── jobs.validator.ts           # Zod schema for POST /api/jobs
 │   │   └── providers.validator.ts
 │   ├── workers/
-│   │   └── jobs.worker.ts              # BullMQ Worker — executes copy/move/delete/sync
+│   │   └── jobs.worker.ts              # BullMQ Worker — streaming copy/move/delete with retry
 │   ├── utils/
 │   ├── app.ts                          # Express app setup, trust proxy, route mounting
 │   └── server.ts                       # HTTP server entry point + startJobsWorker()
@@ -279,6 +283,17 @@ All routes require an `Authorization: Bearer <supabase_access_token>` header.
 | `DELETE` | `/api/jobs/:id` | ✅ | Permanently delete a job |
 | `DELETE` | `/api/jobs?filter=completed` | ✅ | Delete all completed/failed/cancelled jobs |
 
+### Scans — `/api/scans`
+
+All routes require an `Authorization: Bearer <supabase_access_token>` header.
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/scans/history` | ✅ | List past duplicate scan records (most recent first) |
+| `DELETE` | `/api/scans/history/:id` | ✅ | Delete a scan history record |
+| `GET` | `/api/scans/quota` | ✅ | Return current scan credit balance and plan scan limit |
+| `POST` | `/api/scans` | ✅ | Trigger a new duplicate scan across selected providers |
+
 #### POST /api/jobs body
 
 ```jsonc
@@ -363,19 +378,46 @@ jobs.worker.ts  (BullMQ Worker, concurrency=4 tasks in parallel)
        ├─ Re-read task from DB — skip if config.is_active=false (toggle-off race guard)
        ├─ UPDATE status=running
        ├─ getUserPlan(userId) → PLAN_LIMITS[plan].threads → pLimit(threads)
+       ├─ loadDoneSet(taskId)  ← Redis: files completed in any prior run of this task
+       ├─ buildDestSet(...)    ← snapshot of destination folder (name:size keys)
        ├─ collectFiles() — walks all pages in source folder
-       ├─ Promise.all(files.map(limit(processFile))) — parallel with throttled DB progress
-       │    copy / sync  → downloadProviderFile → uploadProviderFile
-       │    move         → download → upload → deleteProviderFile
-       │    delete       → deleteProviderFile
-       │    skip (GDrive non-exportable / download-restricted) → warning accumulated
+       ├─ Promise.all(files.map(limit(processFile))) — parallel, throttled DB progress
+       │    processFile():
+       │      1. Skip if doneSet.has(fileId)           ← Layer 1: Redis idempotency
+       │      2. Skip if destSet.has("name:size")      ← Layer 2: destination snapshot
+       │      3. retryWithBackoff(() => copyProviderFile(...), maxAttempts=3)
+       │           ↓ streaming copy (see File Transfer Architecture below)
+       │      4. markFileDone(taskId, fileId) → Redis hash  ← persist for crash recovery
+       │      5. destSet.add("name:size") → prevent concurrent thread duplicates
+       │    On permanent error (403/404/413/415): accumulate, continue
+       │    On transient error (network/429/5xx): retry with exponential backoff
+       │    Abort entire job if >50% of files fail hard (after ≥5 files processed)
        └─ On success:
             frequency=once/immediate → UPDATE status=completed, progress=100
+                                     → clearTaskProgress(taskId) (keep Redis tidy)
             frequency=recurring      → computeNextRunAt → UPDATE status=pending, progress=0
                                      → jobQueue.add(delay) for next run
 ```
 
-### File-level parallelism (Option A — current)
+### Stall recovery
+
+On worker startup, `recoverStalledTasks()` scans for any tasks stuck in `status=running` (left by a previous crash) and marks them `failed` with a stall message. This ensures the UI never shows a permanently spinning job.
+
+`worker.on('failed', ...)` handles the BullMQ-level failure event (job exhausted retries or threw uncaught) and applies the same `running → failed` update with the error message.
+
+### Retry strategy
+
+```
+retryWithBackoff(fn, maxAttempts=3, baseDelayMs=500)
+  attempt 1 → fail → wait 500ms
+  attempt 2 → fail → wait 1000ms
+  attempt 3 → fail → throw (permanent failure)
+
+Permanent errors (no retry): HTTP 401, 403, 404, 413, 415, GDriveNotExportable
+Transient errors (retried):   network timeout, HTTP 429, HTTP 5xx, ECONNRESET
+```
+
+### File-level parallelism
 
 Files within a single task are processed concurrently using [`p-limit`](https://github.com/sindresorhus/p-limit). The concurrency cap is read from the user's plan at task start time, so upgrading a plan takes effect on the next job run.
 
@@ -396,6 +438,73 @@ Dispatch each chunk to a separate HTTP-triggered function (Railway Functions / A
 - Pros: effectively unlimited parallelism, no worker memory ceiling.
 - Cons: HTTP overhead per chunk, cold-start latency, complex result collection, harder to enforce per-user rate limits, significant infra cost at scale.
 - When to consider: if Option B throughput is still insufficient at Business tier and workloads are bursty.
+
+---
+
+## File Transfer Architecture
+
+### Streaming copy (zero-buffer for large files)
+
+`copyProviderFile()` in `files.service.ts` streams data directly from the source provider to the destination without loading the entire file into memory. This makes 2 GB+ transfers possible on a constrained server.
+
+```
+copyProviderFile(userId, srcProviderId, srcFileId, …, dstProviderId, dstParentId)
+  ├─ resolveAccessToken(userId, srcProviderId) ─┐ parallel
+  ├─ resolveAccessToken(userId, dstProviderId) ─┘
+  ├─ adapterDownloadFileStream(srcProvider, …)
+  │    → returns { stream: ReadableStream<Uint8Array>, contentType, fileName, size }
+  └─ adapterUploadFileStream(dstProvider, …, stream, size)
+       → pipes the ReadableStream directly into the upload body
+```
+
+### Per-provider streaming behaviour
+
+| Provider | Download | Upload | Notes |
+|---|---|---|---|
+| **Google Drive** | Stream (`resp.body`) | Resumable upload API (`uploadType=resumable`) | Workspace formats (Docs/Sheets) export as Office with buffer fallback |
+| **OneDrive** | Stream (`resp.body`) | `PUT /content` with stream body | Uses `duplex: 'half'` for Node.js streaming fetch |
+| **Dropbox** | Stream (`resp.body`) | `POST /upload` with stream body | |
+| **Box** | Stream (`resp.body`) | Multipart POST — buffers stream | Box upload API requires multipart encoding |
+| **MEGA** | Buffer (SDK requirement) | SDK `parent.upload()` | `megajs` SDK is buffer-only; fully streaming not possible |
+| **AWS S3** | Stream (`GetObjectCommand`) | `PutObjectCommand` with stream | Native SDK streaming via `@aws-sdk/client-s3` |
+
+> **Note:** For transfers involving MEGA as the destination, the download stream is buffered before upload because the `megajs` SDK does not accept a Node.js `ReadableStream`. All other provider combinations are fully streaming (no full-file buffer in server memory).
+
+### Google Drive resumable upload flow
+
+Large files uploaded to Google Drive use the resumable upload API to avoid size limits:
+
+```
+1. POST https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable
+   Body: { name, mimeType, parents }
+   Response: Location header = upload session URL
+
+2. PUT <upload-session-url>
+   Headers: Content-Type, Content-Length (if known)
+   Body: ReadableStream piped directly (duplex: 'half')
+```
+
+### Idempotency — preventing duplicate files on retry
+
+Two layers prevent duplicate files if a job is retried after a crash:
+
+| Layer | Mechanism | Covers |
+|---|---|---|
+| **Redis doneSet** | `task_progress:{taskId}` hash (TTL 30 days) | Files confirmed done in a prior run |
+| **Destination snapshot** | `name:size` set built at job start | Files already present in the destination folder |
+
+```
+Before copying file F:
+  if doneSet.has(F.id)                → skip (already copied in earlier run)
+  if destSet.has(`${F.name}:${F.size}`) → skip + markFileDone (already at destination)
+After successful copy:
+  destSet.add(`${F.name}:${F.size}`)  → blocks concurrent thread from re-copying same file
+  markFileDone(taskId, F.id)          → persists to Redis for crash recovery
+```
+
+The `task_progress` key is deleted on successful one-shot job completion to keep Redis tidy. For recurring jobs the key is retained so the next run can still skip already-transferred files.
+
+---
 
 ### Schedule frequencies
 
@@ -448,6 +557,17 @@ Mobile App
                                          ↓
                                req.user = { id, email, phone }
 ```
+
+### Token in query param (`?token=`)
+
+The download endpoint also accepts the token as a `?token=<access_token>` query parameter. This is used when files are opened in the in-app browser (`expo-web-browser` / Chrome Custom Tabs), which cannot set custom HTTP headers. The auth middleware checks both sources:
+
+```
+Authorization: Bearer <token>   ← standard API calls
+?token=<token>                  ← browser-opened download URLs
+```
+
+This follows the same pattern as pre-signed URLs (S3, GCS) — the URL itself carries the credential for browser scenarios.
 
 ## OAuth Flow for Cloud Providers
 

@@ -9,6 +9,8 @@ import {
   renameFile as adapterRenameFile,
   uploadFile as adapterUploadFile,
   downloadFile as adapterDownloadFile,
+  downloadFileStream as adapterDownloadFileStream,
+  uploadFileStream as adapterUploadFileStream,
   indexFiles as adapterIndexFiles,
 } from './files-adapters';
 
@@ -164,6 +166,37 @@ export async function downloadProviderFile(
 ) {
   const { accessToken, providerType } = await resolveAccessToken(userId, providerId);
   return adapterDownloadFile(providerType, accessToken, fileId, fileName, filePath);
+}
+
+/**
+ * Stream-copy a file from one provider to another without buffering the full
+ * content in memory. Safe for large files (2 GB+).
+ * Returns the number of bytes transferred (from Content-Length; 0 if unknown).
+ */
+export async function copyProviderFile(
+  userId: string,
+  srcProviderId: string,
+  srcFileId: string,
+  srcFileName: string,
+  srcFilePath: string | null,
+  dstProviderId: string,
+  dstParentId: string | null,
+): Promise<{ fileName: string; contentType: string; bytesTransferred: number }> {
+  const [src, dst] = await Promise.all([
+    resolveAccessToken(userId, srcProviderId),
+    resolveAccessToken(userId, dstProviderId),
+  ]);
+
+  const { stream, contentType, fileName, size } = await adapterDownloadFileStream(
+    src.providerType, src.accessToken, srcFileId, srcFileName, srcFilePath,
+  );
+
+  await adapterUploadFileStream(
+    dst.providerType, dst.accessToken, dstParentId, fileName,
+    contentType || 'application/octet-stream', stream, size,
+  );
+
+  return { fileName, contentType, bytesTransferred: size };
 }
 
 /**
