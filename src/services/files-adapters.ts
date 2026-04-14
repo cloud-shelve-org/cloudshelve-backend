@@ -1212,13 +1212,28 @@ async function deleteMegaFile(
 ): Promise<void> {
   return withMegaStorage(credentialsJson, async (storage) => {
     const node = storage.files[fileId];
-    if (!node) throw new Error('File not found');
+    if (!node) throw new Error('File not found in MEGA storage');
+
     await new Promise<void>((res, rej) => {
-      node.delete(false, (err: Error | null) => {
-        if (err) return rej(err);
+      // permanent = true → bypass MEGA trash, reclaim quota immediately.
+      // The in-memory tree is updated manually below so subsequent list
+      // calls within the same cached session reflect the deletion.
+      node.delete(true, (err: Error | null) => {
+        if (err) return rej(new Error('MEGA delete failed: ' + err.message));
         res();
       });
     });
+
+    // Keep the in-memory session tree consistent so we don't need to
+    // invalidate the (expensive) cached login session.
+    try {
+      delete storage.files[fileId];
+      if (node.parent?.children) {
+        node.parent.children = node.parent.children.filter(
+          (c: any) => c.nodeId !== fileId,
+        );
+      }
+    } catch { /* non-fatal — next login will refresh */ }
   });
 }
 
@@ -1686,11 +1701,15 @@ async function cleanupGDriveLarge(
   pageToken: string | null,
   pageSize: number,
 ): Promise<ListFilesResult> {
+  // Drive API v3 does not support `size` as a query term.
+  // Fetch sorted by quotaBytesUsed desc (largest first) and filter client-side.
+  // Fetch a larger batch so that after filtering we still have enough results.
+  const fetchSize = Math.min(pageSize * 4, 1000);
   const params = new URLSearchParams({
-    q: `trashed = false and mimeType != '${GDRIVE_FOLDER_MIME}' and size > ${minSizeBytes}`,
+    q: `trashed = false and mimeType != '${GDRIVE_FOLDER_MIME}'`,
     fields: GDRIVE_FIELDS,
     orderBy: 'quotaBytesUsed desc',
-    pageSize: String(pageSize),
+    pageSize: String(fetchSize),
     includeItemsFromAllDrives: 'true',
     supportsAllDrives: 'true',
     ...(pageToken ? { pageToken } : {}),
@@ -1701,7 +1720,11 @@ async function cleanupGDriveLarge(
   );
   if (!resp.ok) throw new Error(`Google Drive large files failed: ${await resp.text()}`);
   const data: any = await resp.json();
-  return { items: (data.files || []).map(mapGoogleDriveItem), nextPageToken: data.nextPageToken || null };
+  const items = (data.files || [])
+    .map(mapGoogleDriveItem)
+    .filter((f: FileItem) => (f.size ?? 0) >= minSizeBytes)
+    .slice(0, pageSize);
+  return { items, nextPageToken: data.nextPageToken || null };
 }
 
 async function cleanupGDriveOld(
@@ -1974,6 +1997,21 @@ async function cleanupBoxEmptyTrash(accessToken: string): Promise<void> {
 
 // ─── MEGA ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Build a set of every nodeId that lives inside storage.trash (recursively).
+ * Used to exclude trashed files from Large / Old cleanup scans.
+ */
+function megaTrashNodeIds(storage: any): Set<string> {
+  const ids = new Set<string>();
+  function collect(node: any) {
+    if (!node) return;
+    if (node.nodeId) ids.add(node.nodeId);
+    for (const child of node.children ?? []) collect(child);
+  }
+  collect(storage.trash);
+  return ids;
+}
+
 async function cleanupMegaLarge(
   credentialsJson: string,
   minSizeBytes: number,
@@ -1981,8 +2019,9 @@ async function cleanupMegaLarge(
   pageSize: number,
 ): Promise<ListFilesResult> {
   return withMegaStorage(credentialsJson, async (storage) => {
+    const trashIds = megaTrashNodeIds(storage);
     const all: FileItem[] = (Object.values(storage.files) as any[])
-      .filter((n) => !n.directory && (n.size ?? 0) >= minSizeBytes)
+      .filter((n) => !n.directory && (n.size ?? 0) >= minSizeBytes && !trashIds.has(n.nodeId))
       .sort((a, b) => (b.size ?? 0) - (a.size ?? 0))
       .map((n) => mapMegaNode(n, n.parent?.nodeId ?? null));
     const offset = pageToken ? parseInt(pageToken, 10) : 0;
@@ -2001,9 +2040,10 @@ async function cleanupMegaOld(
   pageSize: number,
 ): Promise<ListFilesResult> {
   return withMegaStorage(credentialsJson, async (storage) => {
+    const trashIds = megaTrashNodeIds(storage);
     const cutoffMs = Date.now() - olderThanDays * 86_400_000;
     const all: FileItem[] = (Object.values(storage.files) as any[])
-      .filter((n) => !n.directory && n.timestamp != null && n.timestamp * 1000 < cutoffMs)
+      .filter((n) => !n.directory && n.timestamp != null && n.timestamp * 1000 < cutoffMs && !trashIds.has(n.nodeId))
       .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
       .map((n) => mapMegaNode(n, n.parent?.nodeId ?? null));
     const offset = pageToken ? parseInt(pageToken, 10) : 0;
