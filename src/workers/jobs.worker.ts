@@ -439,6 +439,15 @@ async function runTask(payload: { taskId: string; userId: string }): Promise<voi
     const limit = pLimit(threads);
     await Promise.all(files.map((file) => limit(() => processFile(file))));
 
+    // If every transfer-eligible file failed and nothing was transferred, fail
+    // the job rather than marking it Done with a warning.  This covers the
+    // common case of a single file that fails all retries.
+    if (isTransferType && completed === 0 && hardFailed > 0) {
+      throw new Error(
+        `${hardFailed} file${hardFailed > 1 ? 's' : ''} failed to transfer after ${MAX_FILE_ATTEMPTS} attempts: ${fileList(hardFailedNames)}.`,
+      );
+    }
+
     // ── Completion ───────────────────────────────────────────────────────────
     const completedAt = new Date().toISOString();
     const isOnce      = !cfg.schedule || cfg.schedule.frequency === 'once' || cfg.schedule.frequency === 'immediate';
