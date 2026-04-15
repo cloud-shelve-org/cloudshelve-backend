@@ -198,7 +198,9 @@ export async function toggleJob(userId: string, taskId: string): Promise<any> {
   }
 
   if (row.status === 'pending' && !cfg.is_active) {
-    // Reactivate: compute next run and schedule
+    // Re-activation: enforce backend plan limit before scheduling
+    await checkActiveJobLimit(userId);
+
     const nextRunAt  = computeNextRunAt(cfg.schedule);
     const delay      = nextRunAt.getTime() - Date.now();
     const bullJobId  = await addDelayedJob(taskId, userId, delay);
